@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CPCT-TINA Collecteur</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0d6efd">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: Arial, sans-serif; background: #f4f6f8; color: #222; }
+    header { background: #0d6efd; color: white; padding: 16px; text-align: center; font-size: 18px; font-weight: bold; }
+    .container { padding: 16px; max-width: 500px; margin: 0 auto; }
+    .card { background: white; border-radius: 10px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+    input, select, button { width: 100%; padding: 12px; margin-top: 8px; border-radius: 8px; border: 1px solid #ccc; font-size: 15px; }
+    button { background: #0d6efd; color: white; border: none; font-weight: bold; cursor: pointer; }
+    button:disabled { background: #999; }
+    button.secondary { background: #6c757d; }
+    button.danger { background: #dc3545; }
+    .hidden { display: none; }
+    .member-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; }
+    .badge { padding: 4px 8px; border-radius: 6px; font-size: 12px; color: white; }
+    .badge.ok { background: #198754; }
+    .badge.due { background: #ffc107; color: #222; }
+    .badge.late { background: #dc3545; }
+    #loading { text-align: center; padding: 40px; color: #666; }
+    #logoutBtn { margin-top: 20px; }
+  </style>
+</head>
+<body>
+
+  <header>CPCT-TINA — Collecteur</header>
+
+  <div class="container">
+
+    <!-- Écran de connexion -->
+    <div id="loginScreen" class="card">
+      <h3>Connexion</h3>
+      <input type="email" id="loginEmail" placeholder="Email">
+      <input type="password" id="loginPassword" placeholder="Mot de passe">
+      <button id="loginBtn">Se connecter</button>
+      <p id="loginError" style="color:red; margin-top:8px;"></p>
+    </div>
+
+    <!-- Chargement -->
+    <div id="loading" class="hidden">Chargement...</div>
+
+    <!-- Tableau de bord collecteur -->
+    <div id="dashboard" class="hidden">
+      <div class="card">
+        <strong id="collectorName">Collecteur</strong>
+        <p id="collectorStats" style="color:#666; font-size:14px;"></p>
+      </div>
+
+      <div class="card">
+        <h3>Mes membres</h3>
+        <div id="membersList"></div>
+      </div>
+
+      <button id="logoutBtn" class="secondary">Déconnexion</button>
+    </div>
+
+  </div>
+
+  <script src="js/firebase-config.js"></script>
+  <script src="js/utils.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
