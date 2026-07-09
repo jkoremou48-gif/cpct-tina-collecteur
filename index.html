@@ -1,68 +1,106 @@
 <!DOCTYPE html>
 <html lang="fr">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>CPCT-TINA Collecteur</title>
-  <link rel="manifest" href="manifest.json">
-  <meta name="theme-color" content="#0d6efd">
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { font-family: Arial, sans-serif; background: #f4f6f8; color: #222; }
-    header { background: #0d6efd; color: white; padding: 16px; text-align: center; font-size: 18px; font-weight: bold; }
-    .container { padding: 16px; max-width: 500px; margin: 0 auto; }
-    .card { background: white; border-radius: 10px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-    input, select, button { width: 100%; padding: 12px; margin-top: 8px; border-radius: 8px; border: 1px solid #ccc; font-size: 15px; }
-    button { background: #0d6efd; color: white; border: none; font-weight: bold; cursor: pointer; }
-    button:disabled { background: #999; }
-    button.secondary { background: #6c757d; }
-    button.danger { background: #dc3545; }
-    .hidden { display: none; }
-    .member-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; }
-    .badge { padding: 4px 8px; border-radius: 6px; font-size: 12px; color: white; }
-    .badge.ok { background: #198754; }
-    .badge.due { background: #ffc107; color: #222; }
-    .badge.late { background: #dc3545; }
-    #loading { text-align: center; padding: 40px; color: #666; }
-    #logoutBtn { margin-top: 20px; }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>CPCT-TINA Collecteur</title>
+<link rel="manifest" href="manifest.json" />
+<meta name="theme-color" content="#0d6efd" />
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, sans-serif; background: #f4f6f8; color: #222; }
+  header { background: #0d6efd; color: white; padding: 16px; text-align: center; font-size: 18px; font-weight: bold; }
+  .container { padding: 16px; max-width: 500px; margin: 0 auto; }
+  .card { background: white; border-radius: 10px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
+  input, select, button { width: 100%; padding: 12px; margin-top: 8px; border-radius: 8px; border: 1px solid #ccc; font-size: 15px; }
+  button { background: #0d6efd; color: white; border: none; font-weight: bold; cursor: pointer; }
+  button:disabled { background: #999; }
+  button.secondary { background: #6c757d; }
+  button.danger { background: #dc3545; }
+  .hidden { display: none; }
+  .member-row { display: flex; justify-content: space-between; align-items: center; padding: 10px 0; border-bottom: 1px solid #eee; }
+  .badge { padding: 4px 8px; border-radius: 6px; font-size: 12px; color: white; }
+  .badge.ok { background: #198754; }
+  .badge.due { background: #ffc107; color: #222; }
+  .badge.late { background: #dc3545; }
+  .badge.attente { background: #6c757d; }
+  #loading { text-align: center; padding: 40px; color: #666; }
+  #logoutBtn { margin-top: 20px; }
+  .link-btn { background: none; color: #0d6efd; text-decoration: underline; font-weight: normal; padding: 4px; width: auto; }
+  .soldes-row { display: flex; justify-content: space-between; font-size: 12px; color: #666; margin-top: 4px; }
+  .soldes-row b.confirme { color: #198754; }
+  .soldes-row b.collecte { color: #fd7e14; }
+  .modal-overlay { position: fixed; top:0; left:0; width:100%; height:100%; background: rgba(0,0,0,0.6); display:flex; align-items:center; justify-content:center; z-index: 1000; }
+  .modal-content { background: white; border-radius: 12px; padding: 20px; width: 88%; max-width: 400px; max-height: 85vh; overflow-y: auto; }
+  .modal-actions { display: flex; gap: 8px; margin-top: 14px; }
+  .modal-actions button { width: auto; flex: 1; }
+</style>
 </head>
 <body>
 
-  <header>CPCT-TINA — Collecteur</header>
+<header>CPCT-TINA — Collecteur</header>
 
-  <div class="container">
+<div class="container">
 
-    <!-- Écran de connexion -->
-    <div id="loginScreen" class="card">
-      <h3>Connexion</h3>
-      <input type="email" id="loginEmail" placeholder="Email">
-      <input type="password" id="loginPassword" placeholder="Mot de passe">
-      <button id="loginBtn">Se connecter</button>
-      <p id="loginError" style="color:red; margin-top:8px;"></p>
-    </div>
+  <div id="loading" class="card">Chargement...</div>
 
-    <!-- Chargement -->
-    <div id="loading" class="hidden">Chargement...</div>
-
-    <!-- Tableau de bord collecteur -->
-    <div id="dashboard" class="hidden">
-      <div class="card">
-        <strong id="collectorName">Collecteur</strong>
-        <p id="collectorStats" style="color:#666; font-size:14px;"></p>
-      </div>
-
-      <div class="card">
-        <h3>Mes membres</h3>
-        <div id="membersList"></div>
-      </div>
-
-      <button id="logoutBtn" class="secondary">Déconnexion</button>
-    </div>
-
+  <!-- Inscription avec code -->
+  <div id="screen-inscription" class="card hidden">
+    <h3>Inscription Collecteur</h3>
+    <p style="color:#666; font-size:13px; margin-top:6px;">Saisissez le code fourni par votre PDG.</p>
+    <form id="form-inscription">
+      <input type="text" id="inscCode" placeholder="Code (ex: COL-4X7K2)" required style="text-transform:uppercase;">
+      <input type="text" id="inscNom" placeholder="Nom complet" required>
+      <input type="tel" id="inscTelephone" placeholder="Téléphone" required>
+      <input type="email" id="inscEmail" placeholder="Email" required>
+      <input type="password" id="inscPassword" placeholder="Mot de passe (6 caractères min)" required minlength="6">
+      <button type="submit">S'inscrire</button>
+    </form>
+    <p id="inscError" style="color:red; margin-top:8px; font-size:13px;"></p>
+    <button type="button" id="voirLoginBtn" class="link-btn">J'ai déjà un compte</button>
   </div>
 
-  <script type="module" src="js/firebase-config.js"></script>
+  <!-- Connexion -->
+  <div id="loginScreen" class="card hidden">
+    <h3>Connexion</h3>
+    <input type="email" id="loginEmail" placeholder="Email">
+    <input type="password" id="loginPassword" placeholder="Mot de passe">
+    <button id="loginBtn">Se connecter</button>
+    <p id="loginError" style="color:red; margin-top:8px; font-size:13px;"></p>
+    <button type="button" id="voirInscriptionBtn" class="link-btn">Je n'ai pas encore de compte</button>
+  </div>
+
+  <!-- Tableau de bord collecteur -->
+  <div id="dashboard" class="hidden">
+    <div class="card">
+      <strong id="collectorName">Collecteur</strong>
+      <p id="collectorStats" style="color:#666; font-size:14px;"></p>
+      <div class="soldes-row">
+        <span>Commission confirmée : <b class="confirme" id="commissionConfirmee">0 GNF</b></span>
+      </div>
+      <div class="soldes-row">
+        <span>Commission en attente : <b class="collecte" id="commissionAttente">0 GNF</b></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3>Mes membres</h3>
+        <button id="nouveauMembreBtn" style="width:auto; padding:8px 12px; font-size:13px;">+ Nouveau</button>
+      </div>
+      <div id="membersList" style="margin-top:10px;"></div>
+    </div>
+
+    <button id="logoutBtn" class="secondary">Déconnexion</button>
+  </div>
+
+</div>
+
+<div id="modal-overlay" class="modal-overlay hidden">
+  <div id="modal-content" class="modal-content"></div>
+</div>
+
+<script type="module" src="js/firebase-config.js"></script>
 <script type="module" src="js/utils.js"></script>
 <script type="module" src="js/app.js"></script>
 </body>
