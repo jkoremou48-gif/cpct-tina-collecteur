@@ -1,17 +1,135 @@
 // ==========================
 // CPCT-TINA — App Collecteur
-// Partie 1 : Auth + Chargement
+// ==========================
+//
+// ⚠️ HYPOTHÈSES / À VALIDER :
+//  - Schéma aligné sur le PDG : collection "users" (role: 'collecteur'/'membre'/'pdg'),
+//    "contracts" {membre_id, collecteur_id, statut:'actif'/'cloture', commission,
+//    montant_mise, date_debut}, "payments" {contract_id, montant, jour_numero, date,
+//    statut:'collecte'/'confirme'} — le champ statut sur payments est NOUVEAU (ajouté
+//    ici pour le double solde), le PDG ne le lit pas encore (chantier "double solde"
+//    côté PDG à faire séparément).
+//  - "+ Nouveau membre" : le collecteur enregistre le 1er versement (jour 1 = commission)
+//    sur place. Le membre créé a statut:'en_attente_validation' — CÔTÉ PDG IL FAUT UN
+//    ÉCRAN POUR VALIDER CES MEMBRES (pas encore construit). Une fois validé, le PDG
+//    génère un code MBR- envoyé au membre pour qu'il s'inscrive sur l'app Membre.
 // ==========================
 
-let currentUser = null;
-let currentCollecteurData = null;
-let membersList = [];
-let withdrawalRequests = [];
+import {
+  auth, db, onAuthStateChanged, signInWithEmailAndPassword,
+  createUserWithEmailAndPassword, signOut, doc, getDoc, setDoc, updateDoc,
+  addDoc, collection, query, where, orderBy, onSnapshot, serverTimestamp,
+} from "./firebase-config.js";
 
-const loginScreen = document.getElementById('loginScreen');
+import { genererCodeParrain, formatGNF, formatDate, notifier } from "./utils.js";
+
+const state = {
+  currentUser: null,
+  currentCollecteurData: null,
+  contracts: [],
+  payments: [],
+  withdrawalRequests: [],
+  unsubscribers: [],
+};
+let creationEnCours = false;
+
 const loading = document.getElementById('loading');
+const screenInscription = document.getElementById('screen-inscription');
+const loginScreen = document.getElementById('loginScreen');
 const dashboard = document.getElementById('dashboard');
 const loginError = document.getElementById('loginError');
+const inscError = document.getElementById('inscError');
+
+function showOnly(el) {
+  [loading, screenInscription, loginScreen, dashboard].forEach((s) => {
+    s.classList.toggle('hidden', s !== el);
+  });
+}
+
+// --- Bascule inscription / connexion ---
+document.getElementById('voirInscriptionBtn').addEventListener('click', () => {
+  showOnly(screenInscription);
+});
+document.getElementById('voirLoginBtn').addEventListener('click', () => {
+  showOnly(loginScreen);
+});
+
+// --- Démarrage ---
+function demarrer() {
+  showOnly(loading);
+  onAuthStateChanged(auth, async (user) => {
+    if (creationEnCours) return;
+    if (user) {
+      const userSnap = await getDoc(doc(db, 'users', user.uid));
+      if (userSnap.exists() && userSnap.data().role === 'collecteur') {
+        state.currentUser = user;
+        state.currentCollecteurData = { uid: user.uid, ...userSnap.data() };
+        lancerDashboard();
+        return;
+      } else {
+        await signOut(auth);
+      }
+    }
+    showOnly(loginScreen);
+  });
+}
+
+// --- Inscription avec code COL- ---
+document.getElementById('form-inscription').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  inscError.textContent = '';
+  const code = document.getElementById('inscCode').value.trim().toUpperCase();
+  const nom = document.getElementById('inscNom').value.trim();
+  const telephone = document.getElementById('inscTelephone').value.trim();
+  const email = document.getElementById('inscEmail').value.trim();
+  const password = document.getElementById('inscPassword').value;
+
+  if (!code.startsWith('COL-')) {
+    inscError.textContent = "Ce code ne correspond pas à un code collecteur (COL-...).";
+    return;
+  }
+
+  creationEnCours = true;
+  try {
+    const codeRef = doc(db, 'codes_parrainage', code);
+    const codeSnap = await getDoc(codeRef);
+
+    if (!codeSnap.exists() || codeSnap.data().type !== 'collecteur' || codeSnap.data().actif !== true) {
+      inscError.textContent = "Code invalide, déjà utilisé, ou expiré. Contactez votre PDG.";
+      creationEnCours = false;
+      return;
+    }
+
+    const pdgId = codeSnap.data().proprietaire_id;
+    const codeParrain = genererCodeParrain('COL');
+
+    const cred = await createUserWithEmailAndPassword(auth, email, password);
+    const userData = {
+      role: 'collecteur',
+      nom, telephone, email,
+      code_parrain: codeParrain,
+      parrain_id: pdgId,
+      statut: 'actif',
+      soldeCollecteur: 0,
+      date_creation: serverTimestamp(),
+    };
+    await setDoc(doc(db, 'users', cred.user.uid), userData);
+    await updateDoc(codeRef, { actif: false, utilise_par: cred.user.uid });
+
+    notifier('Compte collecteur créé avec succès.', 'succes');
+    state.currentUser = cred.user;
+    state.currentCollecteurData = { uid: cred.user.uid, ...userData };
+    creationEnCours = false;
+    lancerDashboard();
+  } catch (err) {
+    notifier('Erreur : ' + err.message, 'erreur');
+    if (auth.currentUser) {
+      try { await auth.currentUser.delete(); } catch (e2) { /* ignore */ }
+      try { await signOut(auth); } catch (e3) { /* ignore */ }
+    }
+    creationEnCours = false;
+  }
+});
 
 // --- Connexion ---
 document.getElementById('loginBtn').addEventListener('click', async () => {
@@ -23,7 +141,6 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
     loginError.textContent = 'Veuillez remplir tous les champs.';
     return;
   }
-
   try {
     await signInWithEmailAndPassword(auth, email, password);
   } catch (err) {
@@ -34,392 +151,261 @@ document.getElementById('loginBtn').addEventListener('click', async () => {
 
 // --- Déconnexion ---
 document.getElementById('logoutBtn').addEventListener('click', async () => {
+  state.unsubscribers.forEach((u) => u());
+  state.unsubscribers = [];
   await signOut(auth);
+  showOnly(loginScreen);
 });
 
-// --- Écoute de l'état de connexion ---
-onAuthStateChanged(auth, async (user) => {
-  if (user) {
-    currentUser = user;
-    loginScreen.classList.add('hidden');
-    loading.classList.remove('hidden');
-    dashboard.classList.add('hidden');
+// --- Lancer le tableau de bord ---
+function lancerDashboard() {
+  showOnly(dashboard);
+  renderCollecteurHeader();
 
-    await loadCollecteurData(user.uid);
-  } else {
-    currentUser = null;
-    loginScreen.classList.remove('hidden');
-    loading.classList.add('hidden');
-    dashboard.classList.add('hidden');
-  }
-});
-
-// --- Charger les données du collecteur connecté ---
-async function loadCollecteurData(uid) {
-  try {
-    const collecteurRef = doc(db, 'collecteurs', uid);
-    const collecteurSnap = await getDoc(collecteurRef);
-
-    if (!collecteurSnap.exists()) {
-      loginError.textContent = 'Compte collecteur non trouvé.';
-      loading.classList.add('hidden');
-      loginScreen.classList.remove('hidden');
-      await signOut(auth);
-      return;
+  const unsubContracts = onSnapshot(
+    query(collection(db, 'contracts'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.contracts = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
     }
-
-    currentCollecteurData = collecteurSnap.data();
-
-    // Écoute en temps réel du solde et infos collecteur
-    onSnapshot(collecteurRef, (snap) => {
-      if (snap.exists()) {
-        currentCollecteurData = snap.data();
-        renderCollecteurHeader();
-      }
-    });
-
-    listenToMembers(uid);
-    listenToWithdrawalRequests(uid);
-
-    loading.classList.add('hidden');
-    dashboard.classList.remove('hidden');
-    renderCollecteurHeader();
-
-  } catch (err) {
-    console.error(err);
-    loading.classList.add('hidden');
-    loginScreen.classList.remove('hidden');
-    loginError.textContent = 'Erreur de chargement. Réessayez.';
-  }
+  );
+  const unsubPayments = onSnapshot(
+    query(collection(db, 'payments'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.payments = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
+  state.unsubscribers.push(unsubContracts, unsubPayments);
 }
 
-// --- Affichage en-tête collecteur ---
+function renderAll() {
+  renderCollecteurHeader();
+  renderMembersList();
+}
+
+// --- En-tête + double solde ---
 function renderCollecteurHeader() {
-  document.getElementById('collectorName').textContent =
-    currentCollecteurData.nom || 'Collecteur';
-  document.getElementById('collectorStats').textContent =
-    `Solde commission : ${formatMontant(currentCollecteurData.soldeCollecteur || 0)}`;
-}// ==========================
-// Partie 2 : Membres + Paiements
-// ==========================
+  document.getElementById('collectorName').textContent = state.currentCollecteurData.nom || 'Collecteur';
 
-// --- Écoute des membres assignés à ce collecteur ---
-function listenToMembers(collecteurUid) {
-  const membersRef = collection(db, 'membres');
-  const q = query(membersRef, where('collecteurId', '==', collecteurUid));
+  const commissionsJour1 = state.payments.filter((p) => p.jour_numero === 1);
+  const confirmee = commissionsJour1.filter((p) => p.statut === 'confirme').reduce((s, p) => s + p.montant, 0);
+  const attente = commissionsJour1.filter((p) => p.statut === 'collecte').reduce((s, p) => s + p.montant, 0);
 
-  onSnapshot(q, (snapshot) => {
-    membersList = [];
-    snapshot.forEach((docSnap) => {
-      membersList.push({ id: docSnap.id, ...docSnap.data() });
-    });
-    renderMembersList();
-  });
+  document.getElementById('collectorStats').textContent = `${state.contracts.length} contrat(s) actif(s)`;
+  document.getElementById('commissionConfirmee').textContent = formatGNF(confirmee);
+  document.getElementById('commissionAttente').textContent = formatGNF(attente);
 }
 
-// --- Affichage de la liste des membres ---
+// --- Liste des membres (via leurs contrats) ---
 function renderMembersList() {
   const container = document.getElementById('membersList');
   container.innerHTML = '';
 
-  if (membersList.length === 0) {
+  const contratsActifs = state.contracts.filter((c) => c.statut === 'actif');
+
+  if (contratsActifs.length === 0) {
     container.innerHTML = '<p style="color:#999;">Aucun membre assigné.</p>';
     return;
   }
 
-  membersList.forEach((membre) => {
-    const statut = getStatutMembre(membre);
+  contratsActifs.forEach((contrat) => {
+    const versements = state.payments.filter((p) => p.contract_id === contrat.id);
+    const joursPayes = versements.length;
+    const statut = getStatutContrat(contrat, versements);
+
     const row = document.createElement('div');
     row.className = 'member-row';
     row.innerHTML = `
       <div>
-        <strong>${membre.nom}</strong><br>
-        <small>Jour ${membre.jourActuel || 0}/31</small>
+        <strong>${contrat.membre_nom || 'Membre'}</strong><br>
+        <small>Jour ${joursPayes}/31</small>
       </div>
       <div style="text-align:right;">
         <span class="badge ${statut.classe}">${statut.texte}</span><br>
         <button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px;"
-          onclick="ouvrirPaiement('${membre.id}')">Encaisser</button>
+          data-contrat="${contrat.id}">Encaisser</button>
       </div>
     `;
+    row.querySelector('button').addEventListener('click', () => ouvrirPaiement(contrat.id));
     container.appendChild(row);
   });
 }
 
-// --- Déterminer le statut d'un membre ---
-function getStatutMembre(membre) {
-  if ((membre.jourActuel || 0) >= 31) {
-    return { texte: 'Terminé', classe: 'ok' };
-  }
-  const aujourdHui = new Date();
-  const dernierPaiement = membre.dernierPaiementDate
-    ? membre.dernierPaiementDate.toDate()
-    : null;
+function getStatutContrat(contrat, versements) {
+  if (versements.length >= 31) return { texte: 'Terminé', classe: 'ok' };
+  if (versements.length === 0) return { texte: 'À démarrer', classe: 'due' };
 
-  if (!dernierPaiement) {
-    return { texte: 'À démarrer', classe: 'due' };
-  }
+  const dernier = versements.reduce((a, b) => (a.jour_numero > b.jour_numero ? a : b));
+  const dateVersement = dernier.date && dernier.date.toDate ? dernier.date.toDate() : null;
+  if (!dateVersement) return { texte: 'À jour', classe: 'due' };
 
-  const diffJours = Math.floor((aujourdHui - dernierPaiement) / (1000 * 60 * 60 * 24));
-  if (diffJours >= 2) {
-    return { texte: 'En retard', classe: 'late' };
-  } else if (diffJours >= 1) {
-    return { texte: 'À jour', classe: 'due' };
-  }
-  return { texte: 'Payé aujourd\'hui', classe: 'ok' };
+  const diffJours = Math.floor((new Date() - dateVersement) / (1000 * 60 * 60 * 24));
+  if (diffJours >= 2) return { texte: 'En retard', classe: 'late' };
+  if (diffJours >= 1) return { texte: 'À jour', classe: 'due' };
+  return { texte: "Payé aujourd'hui", classe: 'ok' };
 }
 
-// --- Ouvrir le formulaire d'encaissement ---
-function ouvrirPaiement(membreId) {
-  const membre = membersList.find(m => m.id === membreId);
-  if (!membre) return;
+// --- Encaissement sur un contrat existant ---
+function ouvrirPaiement(contratId) {
+  const contrat = state.contracts.find((c) => c.id === contratId);
+  if (!contrat) return;
+  const versements = state.payments.filter((p) => p.contract_id === contratId);
+  const prochainJour = versements.length + 1;
 
-  const montant = prompt(`Montant reçu de ${membre.nom} (jour ${((membre.jourActuel || 0) + 1)}/31) :`);
+  const montant = prompt(`Montant reçu de ${contrat.membre_nom} (jour ${prochainJour}/31) :`);
   if (montant === null) return;
-
   const montantNum = parseFloat(montant);
   if (isNaN(montantNum) || montantNum <= 0) {
-    alert('Montant invalide.');
+    notifier('Montant invalide.', 'erreur');
     return;
   }
-
-  enregistrerPaiement(membre, montantNum);
+  enregistrerVersement(contrat, montantNum, prochainJour);
 }
 
-// --- Enregistrer le paiement + répartition commission si jour 1 ---
-async function enregistrerPaiement(membre, montant) {
+async function enregistrerVersement(contrat, montant, jourNumero) {
   try {
-    const membreRef = doc(db, 'membres', membre.id);
-    const nouveauJour = (membre.jourActuel || 0) + 1;
-    const estPremierJour = nouveauJour === 1;
-
-    await updateDoc(membreRef, {
-      jourActuel: nouveauJour,
-      dernierPaiementDate: serverTimestamp()
+    await addDoc(collection(db, 'payments'), {
+      contract_id: contrat.id,
+      collecteur_id: state.currentCollecteurData.uid,
+      membre_id: contrat.membre_id,
+      montant,
+      jour_numero: jourNumero,
+      statut: 'collecte',
+      date: serverTimestamp(),
     });
 
-    await addDoc(collection(db, 'paiements'), {
-      membreId: membre.id,
-      membreNom: membre.nom,
-      collecteurId: currentUser.uid,
-      montant: montant,
-      jour: nouveauJour,
-      date: serverTimestamp()
-    });
-
-    // Si c'est le jour 1 : répartition de la commission 30/70
-    if (estPremierJour && membre.commissionContrat) {
-      const commissionCollecteur = membre.commissionContrat * 0.30;
-      const commissionPDG = membre.commissionContrat * 0.70;
-
-      const collecteurRef = doc(db, 'collecteurs', currentUser.uid);
-      await updateDoc(collecteurRef, {
-        soldeCollecteur: (currentCollecteurData.soldeCollecteur || 0) + commissionCollecteur
-      });
-
-      // Le PDG est identifié par un champ fixe ou récupéré via config
-      const pdgRef = doc(db, 'pdg', 'compte_principal');
-      const pdgSnap = await getDoc(pdgRef);
-      const soldeActuelPDG = pdgSnap.exists() ? (pdgSnap.data().soldeCommission || 0) : 0;
-      await updateDoc(pdgRef, {
-        soldeCommission: soldeActuelPDG + commissionPDG
-      });
+    if (jourNumero >= 31) {
+      await updateDoc(doc(db, 'contracts', contrat.id), { statut: 'cloture' });
     }
 
-    afficherRecu({
-      type: 'Encaissement',
-      nom: membre.nom,
-      montant: montant,
-      jour: nouveauJour,
-      date: new Date()
-    });
-
+    notifier('Versement enregistré (en attente de confirmation du PDG).', 'succes');
+    afficherRecu({ nom: contrat.membre_nom, montant, jour: jourNumero, date: new Date() });
   } catch (err) {
     console.error(err);
-    alert('Erreur lors de l\'enregistrement du paiement.');
+    notifier('Erreur : ' + err.message, 'erreur');
   }
-} // ==========================
-// Partie 3 : Décaissements + Reçu
-// ==========================
-
-// --- Écoute des demandes de décaissement pour ce collecteur ---
-function listenToWithdrawalRequests(collecteurUid) {
-  const requestsRef = collection(db, 'demandesDecaissement');
-  const q = query(
-    requestsRef,
-    where('collecteurId', '==', collecteurUid),
-    where('statut', 'in', ['en_attente_collecteur'])
-  );
-
-  onSnapshot(q, (snapshot) => {
-    withdrawalRequests = [];
-    snapshot.forEach((docSnap) => {
-      withdrawalRequests.push({ id: docSnap.id, ...docSnap.data() });
-    });
-    renderWithdrawalRequests();
-  });
 }
 
-// --- Affichage des demandes en attente ---
-function renderWithdrawalRequests() {
-  let container = document.getElementById('withdrawalRequestsList');
-  if (!container) {
-    const card = document.createElement('div');
-    card.className = 'card';
-    card.innerHTML = `<h3>Demandes de décaissement</h3><div id="withdrawalRequestsList"></div>`;
-    document.getElementById('dashboard').insertBefore(card, document.getElementById('logoutBtn'));
-    container = document.getElementById('withdrawalRequestsList');
-  }
-
-  container.innerHTML = '';
-
-  if (withdrawalRequests.length === 0) {
-    container.innerHTML = '<p style="color:#999;">Aucune demande en attente.</p>';
-    return;
-  }
-
-  withdrawalRequests.forEach((demande) => {
-    const row = document.createElement('div');
-    row.className = 'member-row';
-    const dateSouhaitee = demande.dateSouhaitee
-      ? demande.dateSouhaitee.toDate().toLocaleDateString('fr-FR')
-      : '—';
-    row.innerHTML = `
-      <div>
-        <strong>${demande.demandeurNom}</strong> (${demande.typeDemandeur})<br>
-        <small>${formatMontant(demande.montant)} — souhaité le ${dateSouhaitee}</small><br>
-        <small>Bénéficiaire : ${demande.beneficiaire}</small>
+// --- Nouveau membre (onboarding sur place, 1er versement = commission) ---
+document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
+  ouvrirModal(`
+    <h2>Nouveau membre</h2>
+    <p class="subtitle-sm">Enregistrez le 1er versement (commission) reçu sur place. Le PDG devra ensuite valider ce membre avant qu'il puisse s'inscrire sur l'app Membre.</p>
+    <form id="form-nouveau-membre">
+      <div class="field-row">
+        <label>Nom complet du membre</label>
+        <input type="text" name="nom" required />
       </div>
-      <div style="text-align:right;">
-        <button style="margin-top:4px; width:auto; padding:6px 10px; font-size:13px;"
-          onclick="approuverDemande('${demande.id}')">Approuver</button>
-        <button class="secondary" style="margin-top:4px; width:auto; padding:6px 10px; font-size:13px;"
-          onclick="reporterDemande('${demande.id}')">Reporter</button>
+      <div class="field-row">
+        <label>Téléphone</label>
+        <input type="tel" name="telephone" required />
       </div>
-    `;
-    container.appendChild(row);
+      <div class="field-row">
+        <label>Montant du versement quotidien (GNF)</label>
+        <input type="number" name="montantJour" min="1" required />
+      </div>
+      <div class="field-row">
+        <label>Commission encaissée aujourd'hui (jour 1, GNF)</label>
+        <input type="number" name="commission" min="1" required />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="modal-annuler-membre" style="flex:1;">Annuler</button>
+        <button type="submit" style="flex:1;">Enregistrer</button>
+      </div>
+    </form>
+  `);
+  document.getElementById('modal-annuler-membre').addEventListener('click', fermerModal);
+  document.getElementById('form-nouveau-membre').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const nom = fd.get('nom').trim();
+    const telephone = fd.get('telephone').trim();
+    const montantJour = Number(fd.get('montantJour'));
+    const commission = Number(fd.get('commission'));
+
+    try {
+      const membreEnAttenteRef = await addDoc(collection(db, 'membres_en_attente_validation'), {
+        nom, telephone,
+        montant_jour: montantJour,
+        collecteur_id: state.currentCollecteurData.uid,
+        statut: 'en_attente_validation',
+        date_creation: serverTimestamp(),
+      });
+
+      const contratRef = await addDoc(collection(db, 'contracts'), {
+        membre_id: null,
+        membre_nom: nom,
+        membre_en_attente_id: membreEnAttenteRef.id,
+        collecteur_id: state.currentCollecteurData.uid,
+        statut: 'actif',
+        commission,
+        montant_mise: montantJour,
+        date_debut: new Date().toISOString(),
+      });
+
+      await addDoc(collection(db, 'payments'), {
+        contract_id: contratRef.id,
+        collecteur_id: state.currentCollecteurData.uid,
+        membre_id: null,
+        montant: commission,
+        jour_numero: 1,
+        statut: 'collecte',
+        date: serverTimestamp(),
+      });
+
+      notifier('Membre enregistré. En attente de validation par le PDG.', 'succes');
+      fermerModal();
+    } catch (err) {
+      console.error(err);
+      notifier('Erreur : ' + err.message, 'erreur');
+    }
   });
-}
+});
 
-// --- Approuver une demande ---
-async function approuverDemande(demandeId) {
-  try {
-    const demandeRef = doc(db, 'demandesDecaissement', demandeId);
-    await updateDoc(demandeRef, {
-      statut: 'approuve_collecteur',
-      dateApprobationCollecteur: serverTimestamp()
-    });
-    alert('Demande approuvée. Le PDG doit maintenant confirmer.');
-  } catch (err) {
-    console.error(err);
-    alert('Erreur lors de l\'approbation.');
-  }
-}
-
-// --- Reporter une demande ---
-async function reporterDemande(demandeId) {
-  const commentaire = prompt('Raison du report (optionnel) :');
-  try {
-    const demandeRef = doc(db, 'demandesDecaissement', demandeId);
-    await updateDoc(demandeRef, {
-      statut: 'reporte',
-      commentaireCollecteur: commentaire || '',
-      dateReport: serverTimestamp()
-    });
-    alert('Demande reportée.');
-  } catch (err) {
-    console.error(err);
-    alert('Erreur lors du report.');
-  }
-}
-
-// --- Demande de décaissement de commission (par le collecteur lui-même) ---
-async function demanderDecaissementCommission() {
-  const montant = prompt('Montant à décaisser (votre commission) :');
-  if (!montant) return;
-  const montantNum = parseFloat(montant);
-  if (isNaN(montantNum) || montantNum <= 0) {
-    alert('Montant invalide.');
-    return;
-  }
-
-  const dateSouhaitee = prompt('Date souhaitée (JJ/MM/AAAA, au moins demain) :');
-  if (!dateSouhaitee) return;
-
-  const beneficiaire = prompt('Numéro Orange Money ou "Espèces" :');
-  if (!beneficiaire) return;
-
-  try {
-    await addDoc(collection(db, 'demandesDecaissement'), {
-      collecteurId: currentUser.uid,
-      demandeurNom: currentCollecteurData.nom,
-      typeDemandeur: 'collecteur',
-      montant: montantNum,
-      dateSouhaitee: parseDateFr(dateSouhaitee),
-      beneficiaire: beneficiaire,
-      statut: 'en_attente_pdg',
-      dateCreation: serverTimestamp()
-    });
-    alert('Demande envoyée au PDG.');
-  } catch (err) {
-    console.error(err);
-    alert('Erreur lors de la demande.');
-  }
-}
-
-// --- Affichage du reçu (fait pour la capture d'écran) ---
+// --- Reçu ---
 function afficherRecu(data) {
   const overlay = document.createElement('div');
-  overlay.style.position = 'fixed';
-  overlay.style.top = 0;
-  overlay.style.left = 0;
-  overlay.style.width = '100%';
-  overlay.style.height = '100%';
-  overlay.style.background = 'rgba(0,0,0,0.6)';
-  overlay.style.display = 'flex';
-  overlay.style.alignItems = 'center';
-  overlay.style.justifyContent = 'center';
-  overlay.style.zIndex = 1000;
-
+  Object.assign(overlay.style, {
+    position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
+    background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center',
+    justifyContent: 'center', zIndex: 1000,
+  });
   const recu = document.createElement('div');
-  recu.style.background = 'white';
-  recu.style.borderRadius = '12px';
-  recu.style.padding = '24px';
-  recu.style.width = '85%';
-  recu.style.maxWidth = '350px';
-  recu.style.textAlign = 'center';
-
+  Object.assign(recu.style, {
+    background: 'white', borderRadius: '12px', padding: '24px',
+    width: '85%', maxWidth: '350px', textAlign: 'center',
+  });
   recu.innerHTML = `
     <h2 style="color:#0d6efd;">CPCT-TINA</h2>
-    <p style="color:#666; margin-bottom:12px;">Reçu de ${data.type}</p>
+    <p style="color:#666; margin-bottom:12px;">Reçu d'encaissement</p>
     <hr>
     <p style="margin:12px 0;"><strong>${data.nom}</strong></p>
-    <p style="font-size:22px; color:#198754; font-weight:bold;">${formatMontant(data.montant)}</p>
-    ${data.jour ? `<p>Jour ${data.jour} / 31</p>` : ''}
+    <p style="font-size:22px; color:#198754; font-weight:bold;">${formatGNF(data.montant)}</p>
+    <p>Jour ${data.jour} / 31</p>
     <p style="color:#999; font-size:13px; margin-top:12px;">
       ${data.date.toLocaleDateString('fr-FR')} à ${data.date.toLocaleTimeString('fr-FR')}
     </p>
     <hr>
     <p style="font-size:12px; color:#aaa;">Faites une capture d'écran de ce reçu</p>
-    <button style="margin-top:16px;" onclick="this.closest('div').parentElement.remove()">Fermer</button>
+    <button style="margin-top:16px;" id="fermer-recu">Fermer</button>
   `;
-
   overlay.appendChild(recu);
   document.body.appendChild(overlay);
+  recu.querySelector('#fermer-recu').addEventListener('click', () => overlay.remove());
 }
 
-// Ajout d'un bouton pour demander décaissement commission (ajouté au chargement)
-document.addEventListener('DOMContentLoaded', () => {
-  setTimeout(() => {
-    const dashboard = document.getElementById('dashboard');
-    if (dashboard && !document.getElementById('demandeCommissionBtn')) {
-      const btn = document.createElement('button');
-      btn.id = 'demandeCommissionBtn';
-      btn.textContent = 'Demander décaissement de ma commission';
-      btn.className = 'secondary';
-      btn.style.marginTop = '10px';
-      btn.onclick = demanderDecaissementCommission;
-      dashboard.insertBefore(btn, document.getElementById('logoutBtn'));
-    }
-  }, 500);
+// --- Modal utilitaires ---
+function ouvrirModal(html) {
+  document.getElementById('modal-content').innerHTML = html;
+  document.getElementById('modal-overlay').classList.remove('hidden');
+}
+function fermerModal() {
+  document.getElementById('modal-overlay').classList.add('hidden');
+  document.getElementById('modal-content').innerHTML = '';
+}
+document.getElementById('modal-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'modal-overlay') fermerModal();
 });
+
+demarrer();
