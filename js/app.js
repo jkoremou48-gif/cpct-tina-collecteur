@@ -203,7 +203,7 @@ function renderAll() {
 function renderCollecteurHeader() {
   document.getElementById('collectorName').textContent = state.currentCollecteurData.nom || 'Collecteur';
 
-  const TC = state.payments.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const TC = state.payments.filter((p) => p.jour_numero === 1).reduce((s, p) => s + Number(p.montant || 0), 0);
   const TV = state.versements.reduce((s, v) => s + Number(v.montant || 0), 0);
   const CC = TC * TAUX_COMMISSION;
   const resteAVerser = TC - TV;
