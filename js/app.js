@@ -398,10 +398,14 @@ function afficherRecu(data) {
 // --- Modal utilitaires ---
 function ouvrirModal(html) {
   document.getElementById('modal-content').innerHTML = html;
-  document.getElementById('modal-overlay').classList.remove('hidden');
+  const overlay = document.getElementById('modal-overlay');
+  overlay.classList.remove('hidden');
+  overlay.style.display = 'flex';
 }
 function fermerModal() {
-  document.getElementById('modal-overlay').classList.add('hidden');
+  const overlay = document.getElementById('modal-overlay');
+  overlay.classList.add('hidden');
+  overlay.style.display = 'none';
   document.getElementById('modal-content').innerHTML = '';
 }
 document.getElementById('modal-overlay').addEventListener('click', (e) => {
