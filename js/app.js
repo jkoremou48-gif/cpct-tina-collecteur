@@ -3,31 +3,34 @@
 // ==========================
 //
 // ⚠️ HYPOTHÈSES / À VALIDER :
-//  - Schéma aligné sur le PDG : collection "users" (role: 'collecteur'/'membre'/'pdg'),
-//    "contracts" {membre_id, collecteur_id, statut:'actif'/'cloture', commission,
-//    montant_mise, date_debut}, "payments" {contract_id, montant, jour_numero, date,
-//    statut:'collecte'/'confirme'} — le champ statut sur payments est NOUVEAU (ajouté
-//    ici pour le double solde), le PDG ne le lit pas encore (chantier "double solde"
-//    côté PDG à faire séparément).
-//  - "+ Nouveau membre" : le collecteur enregistre le 1er versement (jour 1 = commission)
-//    sur place. Le membre créé a statut:'en_attente_validation' — CÔTÉ PDG IL FAUT UN
-//    ÉCRAN POUR VALIDER CES MEMBRES (pas encore construit). Une fois validé, le PDG
-//    génère un code MBR- envoyé au membre pour qu'il s'inscrive sur l'app Membre.
+//  - Le collecteur crée les comptes membres directement (autonomie totale,
+//    plus de validation PDG). Connexion du membre par téléphone (email
+//    technique généré en interne, jamais montré au membre).
+//  - TC (Total Collecté) = somme de tous les paiements enregistrés par ce
+//    collecteur (payments.collecteur_id === uid), tous statuts confondus.
+//  - TV (Total Versé) = somme des versements de ce collecteur vers la caisse
+//    de l'entreprise, enregistrés par le PDG (collection versements_collecteur).
+//  - CC (vue collecteur) = 30% du TC — indicatif, pas encore reconnu par le PDG.
+//  - Reste à verser = TC - TV.
 // ==========================
 
 import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, doc, getDoc, setDoc, updateDoc,
   addDoc, collection, query, where, orderBy, onSnapshot, serverTimestamp,
+  creerCompteSecondaire,
 } from "./firebase-config.js";
 
 import { genererCodeParrain, formatGNF, formatDate, notifier } from "./utils.js";
+
+const TAUX_COMMISSION = 0.30;
 
 const state = {
   currentUser: null,
   currentCollecteurData: null,
   contracts: [],
   payments: [],
+  versements: [],
   withdrawalRequests: [],
   unsubscribers: [],
 };
@@ -44,6 +47,12 @@ function showOnly(el) {
   [loading, screenInscription, loginScreen, dashboard].forEach((s) => {
     s.classList.toggle('hidden', s !== el);
   });
+}
+
+// --- Convertit un numéro de téléphone en "email technique" pour Firebase Auth ---
+function telephoneVersEmailTechnique(telephone) {
+  const chiffres = telephone.replace(/\D/g, "");
+  return `${chiffres}@membre.cpct-tina.local`;
 }
 
 // --- Bascule inscription / connexion ---
@@ -110,7 +119,6 @@ document.getElementById('form-inscription').addEventListener('submit', async (e)
       code_parrain: codeParrain,
       parrain_id: pdgId,
       statut: 'actif',
-      soldeCollecteur: 0,
       date_creation: serverTimestamp(),
     };
     await setDoc(doc(db, 'users', cred.user.uid), userData);
@@ -176,7 +184,14 @@ function lancerDashboard() {
       renderAll();
     }
   );
-  state.unsubscribers.push(unsubContracts, unsubPayments);
+  const unsubVersements = onSnapshot(
+    query(collection(db, 'versements_collecteur'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.versements = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
+  state.unsubscribers.push(unsubContracts, unsubPayments, unsubVersements);
 }
 
 function renderAll() {
@@ -184,18 +199,31 @@ function renderAll() {
   renderMembersList();
 }
 
-// --- En-tête + double solde ---
+// --- En-tête + TC / TV / CC ---
 function renderCollecteurHeader() {
   document.getElementById('collectorName').textContent = state.currentCollecteurData.nom || 'Collecteur';
 
-  const commissionsJour1 = state.payments.filter((p) => p.jour_numero === 1);
-  const confirmee = commissionsJour1.filter((p) => p.statut === 'confirme').reduce((s, p) => s + p.montant, 0);
-  const attente = commissionsJour1.filter((p) => p.statut === 'collecte').reduce((s, p) => s + p.montant, 0);
+  const TC = state.payments.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const TV = state.versements.reduce((s, v) => s + Number(v.montant || 0), 0);
+  const CC = TC * TAUX_COMMISSION;
+  const resteAVerser = TC - TV;
 
   document.getElementById('collectorStats').textContent = `${state.contracts.length} contrat(s) actif(s)`;
-  document.getElementById('commissionConfirmee').textContent = formatGNF(confirmee);
-  document.getElementById('commissionAttente').textContent = formatGNF(attente);
-}
+  document.getElementById('commissionConfirmee').textContent = formatGNF(TV);
+  document.getElementById('commissionAttente').textContent = formatGNF(resteAVerser);
+
+  let soldeTC = document.getElementById('soldeTC');
+  if (!soldeTC) {
+    const bloc = document.createElement('div');
+    bloc.innerHTML = `
+      <div class="soldes-row"><span>Total collecté (TC) : <b id="soldeTC">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission estimée (30% TC) : <b id="soldeCC">0 GNF</b></span></div>
+    `;
+    document.getElementById('commissionAttente').closest('.card').appendChild(bloc);
+    soldeTC = document.getElementById('soldeTC');
+  }
+  soldeTC.textContent = formatGNF(TC);
+  document.getElementById('soldeCC').textContent = formatGNF(CC);}
 
 // --- Liste des membres (via leurs contrats) ---
 function renderMembersList() {
@@ -279,7 +307,7 @@ async function enregistrerVersement(contrat, montant, jourNumero) {
       await updateDoc(doc(db, 'contracts', contrat.id), { statut: 'cloture' });
     }
 
-    notifier('Versement enregistré (en attente de confirmation du PDG).', 'succes');
+    notifier('Versement enregistré.', 'succes');
     afficherRecu({ nom: contrat.membre_nom, montant, jour: jourNumero, date: new Date() });
   } catch (err) {
     console.error(err);
@@ -287,19 +315,23 @@ async function enregistrerVersement(contrat, montant, jourNumero) {
   }
 }
 
-// --- Nouveau membre (onboarding sur place, 1er versement = commission) ---
+// --- Nouveau membre : création DIRECTE du compte (plus de validation PDG) ---
 document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
   ouvrirModal(`
     <h2>Nouveau membre</h2>
-    <p class="subtitle-sm">Enregistrez le 1er versement (commission) reçu sur place. Le PDG devra ensuite valider ce membre avant qu'il puisse s'inscrire sur l'app Membre.</p>
+    <p class="subtitle-sm">Créez le compte du membre et enregistrez son 1er versement (commission). Il pourra se connecter avec son téléphone et le mot de passe ci-dessous.</p>
     <form id="form-nouveau-membre">
       <div class="field-row">
         <label>Nom complet du membre</label>
         <input type="text" name="nom" required />
       </div>
       <div class="field-row">
-        <label>Téléphone</label>
+        <label>Téléphone (identifiant de connexion)</label>
         <input type="tel" name="telephone" required />
+      </div>
+      <div class="field-row">
+        <label>Mot de passe à créer (6 caractères min)</label>
+        <input type="text" name="password" minlength="6" required />
       </div>
       <div class="field-row">
         <label>Montant du versement quotidien (GNF)</label>
@@ -311,7 +343,7 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
       </div>
       <div class="modal-actions">
         <button type="button" class="secondary" id="modal-annuler-membre" style="flex:1;">Annuler</button>
-        <button type="submit" style="flex:1;">Enregistrer</button>
+        <button type="submit" style="flex:1;">Créer le compte</button>
       </div>
     </form>
   `);
@@ -321,22 +353,25 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
     const fd = new FormData(e.target);
     const nom = fd.get('nom').trim();
     const telephone = fd.get('telephone').trim();
+    const password = fd.get('password');
     const montantJour = Number(fd.get('montantJour'));
     const commission = Number(fd.get('commission'));
 
     try {
-      const membreEnAttenteRef = await addDoc(collection(db, 'membres_en_attente_validation'), {
+      const emailTechnique = telephoneVersEmailTechnique(telephone);
+      const uid = await creerCompteSecondaire(emailTechnique, password);
+
+      await setDoc(doc(db, 'users', uid), {
+        role: 'membre',
         nom, telephone,
-        montant_jour: montantJour,
-        collecteur_id: state.currentCollecteurData.uid,
-        statut: 'en_attente_validation',
+        parrain_id: state.currentCollecteurData.uid,
+        statut: 'actif',
         date_creation: serverTimestamp(),
       });
 
       const contratRef = await addDoc(collection(db, 'contracts'), {
-        membre_id: null,
+        membre_id: uid,
         membre_nom: nom,
-        membre_en_attente_id: membreEnAttenteRef.id,
         collecteur_id: state.currentCollecteurData.uid,
         statut: 'actif',
         commission,
@@ -347,14 +382,14 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
       await addDoc(collection(db, 'payments'), {
         contract_id: contratRef.id,
         collecteur_id: state.currentCollecteurData.uid,
-        membre_id: null,
+        membre_id: uid,
         montant: commission,
         jour_numero: 1,
         statut: 'collecte',
         date: serverTimestamp(),
       });
 
-      notifier('Membre enregistré. En attente de validation par le PDG.', 'succes');
+      notifier(`Compte créé. Transmettez au membre : téléphone ${telephone} + le mot de passe choisi.`, 'succes');
       fermerModal();
     } catch (err) {
       console.error(err);
