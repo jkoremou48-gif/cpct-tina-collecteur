@@ -1,10 +1,12 @@
 {
-  "name": "CPCT-TINA Collecteur",
-  "short_name": "TINA Collecteur",
+  "name": "CPCT-TINA — Espace Collecteur",
+  "short_name": "CPCT-TINA Collecteur",
+  "description": "Application de gestion pour le Collecteur",
   "start_url": "./index.html",
   "display": "standalone",
-  "background_color": "#f4f6f8",
-  "theme_color": "#0d6efd",
+  "background_color": "#14213D",
+  "theme_color": "#14213D",
+  "orientation": "portrait",
   "icons": [
     {
       "src": "icon-192.png",
