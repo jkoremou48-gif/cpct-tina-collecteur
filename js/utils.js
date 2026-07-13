@@ -12,14 +12,15 @@ export function formatGNF(montant) {
   return n.toLocaleString("fr-FR") + " GNF";
 }
 
-export function formatDate(dateStr) {
-  if (!dateStr) return "—";
-  const d = new Date(dateStr);
+export function formatDate(dateVal) {
+  if (!dateVal) return "—";
+  const d = dateVal.toDate ? dateVal.toDate() : new Date(dateVal);
   return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "short", year: "numeric" });
 }
 
-export function moisDeDate(dateStr) {
-  const d = new Date(dateStr);
+export function moisDeDate(dateVal) {
+  if (!dateVal) return "inconnu";
+  const d = dateVal.toDate ? dateVal.toDate() : new Date(dateVal);
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
