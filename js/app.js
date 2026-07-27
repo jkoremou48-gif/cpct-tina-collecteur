@@ -210,31 +210,53 @@ function renderCollecteurHeader() {
 
   const TC = state.payments.filter((p) => p.jour_numero === 1).reduce((s, p) => s + Number(p.montant || 0), 0);
   const TV = state.versements.reduce((s, v) => s + Number(v.montant || 0), 0);
+  function renderCollecteurHeader() {
+  document.getElementById('collectorName').textContent = state.currentCollecteurData.nom || 'Collecteur';
+
+  const TC = state.payments.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const TV = state.versements.reduce((s, v) => s + Number(v.montant || 0), 0);
   const CC = TC * TAUX_COMMISSION;
   const resteAVerser = TC - TV;
+
+  const versementsConfirmes = state.payments.filter((p) => p.statut === 'confirme');
+  const versementsNonConfirmes = state.payments.filter((p) => p.statut !== 'confirme');
+  const versementConfirmeTotal = versementsConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const versementNonConfirmeTotal = versementsNonConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
+
+  const contratsConfirmes = state.contracts.filter((c) =>
+    state.payments.some((p) => p.contract_id === c.id && p.jour_numero === 1 && p.statut === 'confirme')
+  ).length;
+
+  const totalCommissionsContrats = state.contracts.reduce((s, c) => s + Number(c.commission || 0), 0);
+  const soldeTotalEpargnes = versementConfirmeTotal - totalCommissionsContrats;
 
   document.getElementById('collectorStats').textContent = `${state.contracts.length} contrat(s) actif(s)`;
   document.getElementById('commissionConfirmee').textContent = formatGNF(TV);
   document.getElementById('commissionAttente').textContent = formatGNF(resteAVerser);
 
-  let soldeTC = document.getElementById('soldeTC');
-  if (!soldeTC) {
-    const bloc = document.createElement('div');
-    bloc.innerHTML = `
+  let situationBloc = document.getElementById('situationGenerale');
+  if (!situationBloc) {
+    situationBloc = document.createElement('div');
+    situationBloc.id = 'situationGenerale';
+    situationBloc.innerHTML = `
+      <div class="soldes-row"><span>Solde total des épargnes : <b id="soldeTotalEpargnes">0 GNF</b></span></div>
+      <hr style="margin:10px 0; border:none; border-top:1px solid #eee;">
+      <div class="soldes-row"><span>Contrats confirmés : <b id="nbContratsConfirmes">0</b></span></div>
+      <div class="soldes-row"><span>Versement total confirmé : <b id="versementConfirme">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Versement non confirmé : <b id="versementNonConfirme">0 GNF</b></span></div>
       <div class="soldes-row"><span>Total collecté (TC) : <b id="soldeTC">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Commission estimée (30% TC) : <b id="soldeCC">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission réalisée (30%) : <b id="soldeCC">0 GNF</b></span></div>
     `;
-    document.getElementById('commissionAttente').closest('.card').appendChild(bloc);
-    soldeTC = document.getElementById('soldeTC');
+    document.getElementById('commissionAttente').closest('.card').appendChild(situationBloc);
   }
-  soldeTC.textContent = formatGNF(TC);
-  document.getElementById('soldeCC').textContent = formatGNF(CC);}
 
-// --- Liste des membres (via leurs contrats) ---
-function renderMembersList() {
-  const container = document.getElementById('membersList');
-  container.innerHTML = '';
-
+  document.getElementById('soldeTotalEpargnes').textContent = formatGNF(soldeTotalEpargnes > 0 ? soldeTotalEpargnes : 0);
+  document.getElementById('nbContratsConfirmes').textContent = contratsConfirmes;
+  document.getElementById('versementConfirme').textContent = formatGNF(versementConfirmeTotal);
+  document.getElementById('versementNonConfirme').textContent = formatGNF(versementNonConfirmeTotal);
+  document.getElementById('soldeTC').textContent = formatGNF(TC);
+  document.getElementById('soldeCC').textContent = formatGNF(CC);
+}
   const contratsActifs = state.contracts.filter((c) => c.statut === 'actif');
 
   if (contratsActifs.length === 0) {
@@ -251,7 +273,7 @@ function renderMembersList() {
     row.className = 'member-row';
     row.innerHTML = `
       <div>
-        <strong>${contrat.membre_nom || 'Membre'}</strong><br>
+        <strong style="cursor:pointer; text-decoration:underline;" data-membre="${contrat.membre_id}">${contrat.membre_nom || 'Membre'}</strong><br>
         <small>Jour ${joursPayes}/31</small>
       </div>
       <div style="text-align:right;">
@@ -261,6 +283,7 @@ function renderMembersList() {
       </div>
     `;
     row.querySelector('button').addEventListener('click', () => ouvrirPaiement(contrat.id));
+    row.querySelector('strong').addEventListener('click', () => afficherDetailsMembre(contrat));
     container.appendChild(row);
   });
 }
@@ -457,6 +480,36 @@ function afficherIdentifiants(data) {
   overlay.appendChild(carte);
   document.body.appendChild(overlay);
   carte.querySelector('#fermer-identifiants').addEventListener('click', () => overlay.remove());
+}
+
+// --- Détails d'un membre (au clic sur son nom) ---
+async function afficherDetailsMembre(contrat) {
+  const versements = state.payments.filter((p) => p.contract_id === contrat.id);
+  const versementsConfirmes = versements.filter((p) => p.statut === 'confirme');
+  const versementsNonConfirmes = versements.filter((p) => p.statut !== 'confirme');
+  const totalConfirme = versementsConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const totalNonConfirme = versementsNonConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const solde = totalConfirme - Number(contrat.commission || 0);
+
+  let telephone = '—';
+  try {
+    const membreSnap = await getDoc(doc(db, 'users', contrat.membre_id));
+    if (membreSnap.exists()) telephone = membreSnap.data().telephone || '—';
+  } catch (e) { /* ignore */ }
+
+  ouvrirModal(`
+    <h2>${contrat.membre_nom}</h2>
+    <p class="subtitle-sm">Téléphone : ${telephone}</p>
+    <div class="soldes-row"><span>Solde actuel : <b>${formatGNF(solde > 0 ? solde : 0)}</b></span></div>
+    <div class="soldes-row"><span>Versement confirmé : <b>${formatGNF(totalConfirme)}</b></span></div>
+    <div class="soldes-row"><span>Versement non confirmé : <b>${formatGNF(totalNonConfirme)}</b></span></div>
+    <div class="soldes-row"><span>Montant du versement quotidien : <b>${formatGNF(contrat.montant_mise || 0)}</b></span></div>
+    <div class="soldes-row"><span>Jours payés : <b>${versements.length}/31</b></span></div>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="modal-fermer-details" style="flex:1;">Fermer</button>
+    </div>
+  `);
+  document.getElementById('modal-fermer-details').addEventListener('click', fermerModal);
 }
 
 // --- Modal utilitaires ---
