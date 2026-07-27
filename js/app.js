@@ -53,16 +53,12 @@ function showOnly(el) {
 function telephoneVersEmailTechnique(telephone) {
   const chiffres = telephone.replace(/\D/g, "");
   return `${chiffres}@membre.cpct-tina.local`;
-}
-
-// --- Bascule inscription / connexion ---
 document.getElementById('voirInscriptionBtn').addEventListener('click', () => {
   showOnly(screenInscription);
 });
-function telephoneVersEmailTechnique(telephone) {
-  const chiffres = telephone.replace(/\D/g, "");
-  return `${chiffres}@membre.cpct-tina.local`;
-}
+document.getElementById('voirLoginBtn').addEventListener('click', () => {
+  showOnly(loginScreen);
+});
 
 // --- Génère le mot de passe du membre à partir des 6 derniers chiffres du téléphone ---
 function genererMotDePasseMembre(telephone) {
@@ -326,8 +322,7 @@ async function enregistrerVersement(contrat, montant, jourNumero) {
 document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
   ouvrirModal(`
     <h2>Nouveau membre</h2>
-    <p class="subtitle-sm">Créez le compte du membre et enregistrez son 1er versement (commission). Il pourra se connecter avec son téléphone et le mot de passe ci-dessous.</p>
-    <form id="form-nouveau-membre">
+    <p class="subtitle-sm">Créez le compte du membre et enregistrez son 1er versement (commission). Un mot de passe est généré automatiquement à partir de son numéro de téléphone.</p>
       <div class="field-row">
         <label>Nom complet du membre</label>
         <input type="text" name="nom" required />
@@ -348,7 +343,7 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
     const fd = new FormData(e.target);
     const nom = fd.get('nom').trim();
     const telephone = fd.get('telephone').trim();
-    const password = fd.get('password');
+    const password = genererMotDePasseMembre(telephone);
     const montantJour = Number(fd.get('montantJour'));
     const commission = Number(fd.get('commission'));
 
@@ -384,8 +379,8 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
         date: serverTimestamp(),
       });
 
-      notifier(`Compte créé. Transmettez au membre : téléphone ${telephone} + le mot de passe choisi.`, 'succes');
       fermerModal();
+      afficherIdentifiants({ nom, telephone, password });
     } catch (err) {
       console.error(err);
       notifier('Erreur : ' + err.message, 'erreur');
@@ -423,6 +418,34 @@ function afficherRecu(data) {
   overlay.appendChild(recu);
   document.body.appendChild(overlay);
   recu.querySelector('#fermer-recu').addEventListener('click', () => overlay.remove());
+}
+
+// --- Identifiants du nouveau membre (à transmettre oralement) ---
+function afficherIdentifiants(data) {
+  const overlay = document.createElement('div');
+  Object.assign(overlay.style, {
+    position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
+    background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center',
+    justifyContent: 'center', zIndex: 1000,
+  });
+  const carte = document.createElement('div');
+  Object.assign(carte.style, {
+    background: 'white', borderRadius: '12px', padding: '24px',
+    width: '85%', maxWidth: '350px', textAlign: 'center',
+  });
+  carte.innerHTML = `
+    <h2 style="color:#0d6efd;">Identifiants du membre</h2>
+    <p style="color:#666; margin-bottom:12px;">À transmettre oralement à ${data.nom}</p>
+    <hr>
+    <p style="margin:12px 0;">Téléphone :<br><strong style="font-size:18px;">${data.telephone}</strong></p>
+    <p style="margin:12px 0;">Mot de passe :<br><strong style="font-size:22px; color:#198754;">${data.password}</strong></p>
+    <hr>
+    <p style="font-size:12px; color:#c0392b;">⚠️ Ce mot de passe ne sera plus jamais affiché ici. Transmettez-le maintenant.</p>
+    <button style="margin-top:16px;" id="fermer-identifiants">J'ai transmis les identifiants</button>
+  `;
+  overlay.appendChild(carte);
+  document.body.appendChild(overlay);
+  carte.querySelector('#fermer-identifiants').addEventListener('click', () => overlay.remove());
 }
 
 // --- Modal utilitaires ---
