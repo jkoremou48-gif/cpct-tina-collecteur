@@ -53,6 +53,8 @@ function showOnly(el) {
 function telephoneVersEmailTechnique(telephone) {
   const chiffres = telephone.replace(/\D/g, "");
   return `${chiffres}@membre.cpct-tina.local`;
+}
+
 document.getElementById('voirInscriptionBtn').addEventListener('click', () => {
   showOnly(screenInscription);
 });
@@ -323,19 +325,28 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
   ouvrirModal(`
     <h2>Nouveau membre</h2>
     <p class="subtitle-sm">Créez le compte du membre et enregistrez son 1er versement (commission). Un mot de passe est généré automatiquement à partir de son numéro de téléphone.</p>
-      <div class="field-row">
-        <label>Nom complet du membre</label>
-        <input type="text" name="nom" required />
-      </div>
-      <div class="field-row">
-        <label>Téléphone (identifiant de connexion)</label>
-        <input type="tel" name="telephone" required />
-      </div>
-      <div class="field-row">
-        <label>Montant du versement quotidien (GNF)</label>
-        <button type="submit" style="flex:1;">Créer le compte</button>
-      </div>
-    </form>
+      <form id="form-nouveau-membre">
+        <div class="field-row">
+          <label>Nom complet du membre</label>
+          <input type="text" name="nom" required />
+        </div>
+        <div class="field-row">
+          <label>Téléphone (identifiant de connexion)</label>
+          <input type="tel" name="telephone" required />
+        </div>
+        <div class="field-row">
+          <label>Montant du versement quotidien (GNF)</label>
+          <input type="number" name="montantJour" min="1" required />
+        </div>
+        <div class="field-row">
+          <label>Commission encaissée aujourd'hui (jour 1, GNF)</label>
+          <input type="number" name="commission" min="1" required />
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="secondary" id="modal-annuler-membre" style="flex:1;">Annuler</button>
+          <button type="submit" style="flex:1;">Créer le compte</button>
+        </div>
+      </form>
   `);
   document.getElementById('modal-annuler-membre').addEventListener('click', fermerModal);
   document.getElementById('form-nouveau-membre').addEventListener('submit', async (e) => {
