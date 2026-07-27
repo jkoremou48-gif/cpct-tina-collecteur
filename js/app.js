@@ -59,9 +59,16 @@ function telephoneVersEmailTechnique(telephone) {
 document.getElementById('voirInscriptionBtn').addEventListener('click', () => {
   showOnly(screenInscription);
 });
-document.getElementById('voirLoginBtn').addEventListener('click', () => {
-  showOnly(loginScreen);
-});
+function telephoneVersEmailTechnique(telephone) {
+  const chiffres = telephone.replace(/\D/g, "");
+  return `${chiffres}@membre.cpct-tina.local`;
+}
+
+// --- Génère le mot de passe du membre à partir des 6 derniers chiffres du téléphone ---
+function genererMotDePasseMembre(telephone) {
+  const chiffres = telephone.replace(/\D/g, "");
+  return chiffres.slice(-6);
+}
 
 // --- Démarrage ---
 function demarrer() {
@@ -330,19 +337,7 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
         <input type="tel" name="telephone" required />
       </div>
       <div class="field-row">
-        <label>Mot de passe à créer (6 caractères min)</label>
-        <input type="text" name="password" minlength="6" required />
-      </div>
-      <div class="field-row">
         <label>Montant du versement quotidien (GNF)</label>
-        <input type="number" name="montantJour" min="1" required />
-      </div>
-      <div class="field-row">
-        <label>Commission encaissée aujourd'hui (jour 1, GNF)</label>
-        <input type="number" name="commission" min="1" required />
-      </div>
-      <div class="modal-actions">
-        <button type="button" class="secondary" id="modal-annuler-membre" style="flex:1;">Annuler</button>
         <button type="submit" style="flex:1;">Créer le compte</button>
       </div>
     </form>
