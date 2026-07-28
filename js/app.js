@@ -211,7 +211,6 @@ function renderCollecteurHeader() {
   const TC = state.payments.reduce((s, p) => s + Number(p.montant || 0), 0);
   const TV = state.versements.reduce((s, v) => s + Number(v.montant || 0), 0);
   
-  const CC = TC * TAUX_COMMISSION;
   const resteAVerser = TC - TV;
 
   const versementsConfirmes = state.payments.filter((p) => p.statut === 'confirme');
@@ -223,8 +222,13 @@ function renderCollecteurHeader() {
     state.payments.some((p) => p.contract_id === c.id && p.jour_numero === 1 && p.statut === 'confirme')
   ).length;
 
-  const totalCommissionsContrats = state.contracts.reduce((s, c) => s + Number(c.commission || 0), 0);
-  const soldeTotalEpargnes = versementConfirmeTotal - totalCommissionsContrats;
+  // Commission = uniquement le jour 1 (frais de compte), confirmé
+  const commissionsConfirmees = versementsConfirmes.filter((p) => p.jour_numero === 1);
+  const totalCommissionConfirmee = commissionsConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const CC = totalCommissionConfirmee * TAUX_COMMISSION;
+
+  // Épargne nette = versements confirmés hors jour 1 (le jour 1 est la commission, pas l'épargne du membre)
+  const soldeTotalEpargnes = versementConfirmeTotal - totalCommissionConfirmee;
 
   document.getElementById('collectorStats').textContent = `${state.contracts.length} contrat(s) actif(s)`;
   document.getElementById('commissionConfirmee').textContent = formatGNF(TV);
