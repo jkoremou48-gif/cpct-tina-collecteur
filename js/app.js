@@ -230,9 +230,13 @@ function renderCollecteurHeader() {
   // Épargne nette = versements confirmés hors jour 1 (le jour 1 est la commission, pas l'épargne du membre)
   const soldeTotalEpargnes = versementConfirmeTotal - totalCommissionConfirmee;
 
+  const commissionsNonConfirmees = versementsNonConfirmes.filter((p) => p.jour_numero === 1);
+  const totalCommissionNonConfirmee = commissionsNonConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const commissionEnAttente = totalCommissionNonConfirmee * TAUX_COMMISSION;
+
   document.getElementById('collectorStats').textContent = `${state.contracts.length} contrat(s) actif(s)`;
-  document.getElementById('commissionConfirmee').textContent = formatGNF(TV);
-  document.getElementById('commissionAttente').textContent = formatGNF(resteAVerser);
+  document.getElementById('commissionConfirmee').textContent = formatGNF(CC);
+  document.getElementById('commissionAttente').textContent = formatGNF(commissionEnAttente);
 
   let situationBloc = document.getElementById('situationGenerale');
   if (!situationBloc) {
