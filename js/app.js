@@ -499,7 +499,10 @@ async function afficherDetailsMembre(contrat) {
   const versementsNonConfirmes = versements.filter((p) => p.statut !== 'confirme');
   const totalConfirme = versementsConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
   const totalNonConfirme = versementsNonConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
-  const solde = totalConfirme - Number(contrat.commission || 0);
+  const commissionConfirmee = versementsConfirmes
+    .filter((p) => p.jour_numero === 1)
+    .reduce((s, p) => s + Number(p.montant || 0), 0);
+  const solde = totalConfirme - commissionConfirmee;
 
   let telephone = '—';
   try {
