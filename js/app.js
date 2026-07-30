@@ -278,6 +278,7 @@ function renderMembersList() {
     const versements = state.payments.filter((p) => p.contract_id === contrat.id);
     const joursPayes = versements.length;
     const statut = getStatutContrat(contrat, versements);
+    const pret = (state.prets || []).find((p) => p.contract_id === contrat.id && p.statut === 'actif');
 
     const row = document.createElement('div');
     row.className = 'member-row';
@@ -285,15 +286,22 @@ function renderMembersList() {
       <div>
         <strong style="cursor:pointer; text-decoration:underline;" data-membre="${contrat.membre_id}">${contrat.membre_nom || 'Membre'}</strong><br>
         <small>Jour ${joursPayes}/31</small>
+        ${pret ? `<br><small style="color:#c0392b;">Prêt en cours : ${formatGNF(calculerMontantDuPret(pret))}</small>` : ''}
       </div>
       <div style="text-align:right;">
         <span class="badge ${statut.classe}">${statut.texte}</span><br>
         <button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px;"
           data-contrat="${contrat.id}">Encaisser</button>
+        ${pret ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#c0392b;"
+          data-pret="${pret.id}">Rembourser prêt</button>` : ''}
       </div>
     `;
-    row.querySelector('button').addEventListener('click', () => ouvrirPaiement(contrat.id));
+    row.querySelector('button[data-contrat]').addEventListener('click', () => ouvrirPaiement(contrat.id));
     row.querySelector('strong').addEventListener('click', () => afficherDetailsMembre(contrat));
+    const btnRembourser = row.querySelector('button[data-pret]');
+    if (btnRembourser) {
+      btnRembourser.addEventListener('click', () => ouvrirRemboursementPret(pret.id));
+    }
     container.appendChild(row);
   });
 }
