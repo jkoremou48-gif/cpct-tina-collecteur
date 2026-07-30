@@ -32,6 +32,8 @@ const state = {
   payments: [],
   versements: [],
   withdrawalRequests: [],
+  prets: [],
+  remboursements: [],
   unsubscribers: [],
 };
 let creationEnCours = false;
@@ -196,7 +198,18 @@ function lancerDashboard() {
       renderAll();
     }
   );
-  state.unsubscribers.push(unsubContracts, unsubPayments, unsubVersements);
+  const unsubPrets = onSnapshot(
+    query(collection(db, 'prets'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.prets = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
+  const unsubRemboursements = onSnapshot(collection(db, 'remboursements_prets'), (snap) => {
+    state.remboursements = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    renderAll();
+  });
+  state.unsubscribers.push(unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements);
 }
 
 function renderAll() {
@@ -305,7 +318,15 @@ function renderMembersList() {
     container.appendChild(row);
   });
 }
-
+function calculerMontantDuPret(pret) {
+  const dateDebut = pret.date_debut && pret.date_debut.toDate ? pret.date_debut.toDate() : new Date();
+  const nbSemaines = Math.floor((new Date() - dateDebut) / (1000 * 60 * 60 * 24 * 7));
+  const montantDuBrut = pret.montant_initial * (1 + pret.taux_hebdo * nbSemaines);
+  const dejaRembourse = (state.remboursements || [])
+    .filter((r) => r.pret_id === pret.id)
+    .reduce((s, r) => s + Number(r.montant || 0), 0);
+  return Math.max(0, montantDuBrut - dejaRembourse);
+}
 function getStatutContrat(contrat, versements) {
   if (versements.length >= 31) return { texte: 'Terminé', classe: 'ok' };
   if (versements.length === 0) return { texte: 'À démarrer', classe: 'due' };
@@ -355,6 +376,42 @@ async function enregistrerVersement(contrat, montant, jourNumero) {
 
     notifier('Versement enregistré.', 'succes');
     afficherRecu({ nom: contrat.membre_nom, montant, jour: jourNumero, date: new Date() });
+  } catch (err) {
+    console.error(err);
+    notifier('Erreur : ' + err.message, 'erreur');
+  }
+}
+function ouvrirRemboursementPret(pretId) {
+  const pret = state.prets.find((p) => p.id === pretId);
+  if (!pret) return;
+  const montantDu = calculerMontantDuPret(pret);
+  const montant = prompt(`Montant dû : ${formatGNF(montantDu)}\nMontant remboursé aujourd'hui :`);
+  if (montant === null) return;
+  const montantNum = parseFloat(montant);
+  if (isNaN(montantNum) || montantNum <= 0) {
+    notifier('Montant invalide.', 'erreur');
+    return;
+  }
+  enregistrerRemboursement(pret, montantNum, montantDu);
+}
+
+async function enregistrerRemboursement(pret, montant, montantDuAvant) {
+  try {
+    await addDoc(collection(db, 'remboursements_prets'), {
+      pret_id: pret.id,
+      membre_id: pret.membre_id,
+      collecteur_id: state.currentCollecteurData.uid,
+      enregistre_par_role: 'collecteur',
+      enregistre_par_uid: state.currentCollecteurData.uid,
+      montant,
+      date: serverTimestamp(),
+    });
+    if (montant >= montantDuAvant) {
+      await updateDoc(doc(db, 'prets', pret.id), { statut: 'rembourse' });
+      notifier('Prêt entièrement remboursé.', 'succes');
+    } else {
+      notifier('Remboursement enregistré.', 'succes');
+    }
   } catch (err) {
     console.error(err);
     notifier('Erreur : ' + err.message, 'erreur');
