@@ -276,23 +276,38 @@ function renderCollecteurHeader() {
   }
 
 // --- Liste des membres (via leurs contrats) ---
+// Affiche pour chaque membre son contrat le plus récent (actif OU clôturé).
+// Un contrat clôturé affiche "Nouveau contrat" à la place d'"Encaisser".
 function renderMembersList() {
   const container = document.getElementById('membersList');
   container.innerHTML = '';
 
-  const contratsActifs = state.contracts.filter((c) => c.statut === 'actif');
   const versementsConfirmesTous = state.payments.filter((p) => p.statut === 'confirme');
 
-  if (contratsActifs.length === 0) {
+  // Un membre peut avoir plusieurs contrats dans le temps : on ne garde que le plus récent par membre.
+  const contratsParMembre = {};
+  state.contracts
+    .filter((c) => c.statut === 'actif' || c.statut === 'cloture')
+    .forEach((c) => {
+      const existant = contratsParMembre[c.membre_id];
+      if (!existant || (c.date_debut || '') > (existant.date_debut || '')) {
+        contratsParMembre[c.membre_id] = c;
+      }
+    });
+  const contratsAffiches = Object.values(contratsParMembre);
+
+  if (contratsAffiches.length === 0) {
     container.innerHTML = '<p style="color:#999;">Aucun membre assigné.</p>';
     return;
   }
 
-  contratsActifs.forEach((contrat) => {
+  contratsAffiches.forEach((contrat) => {
     const versements = state.payments.filter((p) => p.contract_id === contrat.id);
     const joursPayes = versements.length;
+    const estCloture = contrat.statut === 'cloture' || joursPayes >= 31;
+
     let statut = getStatutContrat(contrat, versements);
-    if (calculerStatutContrat(contrat, versementsConfirmesTous) === 'inactif') {
+    if (!estCloture && calculerStatutContrat(contrat, versementsConfirmesTous) === 'inactif') {
       statut = { texte: 'Inactif', classe: 'late' };
     }
     const pret = (state.prets || []).find((p) => p.contract_id === contrat.id && p.statut === 'actif');
@@ -307,308 +322,11 @@ function renderMembersList() {
       </div>
       <div style="text-align:right;">
         <span class="badge ${statut.classe}">${statut.texte}</span><br>
-        <button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px;"
-          data-contrat="${contrat.id}">Encaisser</button>
+        ${estCloture
+          ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#198754;"
+              data-nouveau-contrat="${contrat.membre_id}" data-nom="${contrat.membre_nom || 'Membre'}">Nouveau contrat</button>`
+          : `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px;"
+              data-contrat="${contrat.id}">Encaisser</button>`
+        }
         ${pret ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#c0392b;"
           data-pret="${pret.id}">Rembourser prêt</button>` : ''}
-      </div>
-    `;
-    row.querySelector('button[data-contrat]').addEventListener('click', () => ouvrirPaiement(contrat.id));
-    row.querySelector('strong').addEventListener('click', () => afficherDetailsMembre(contrat));
-    const btnRembourser = row.querySelector('button[data-pret]');
-    if (btnRembourser) {
-      btnRembourser.addEventListener('click', () => ouvrirRemboursementPret(pret.id));
-    }
-    container.appendChild(row);
-  });
-}
-function calculerMontantDuPret(pret) {
-  const dateDebut = pret.date_debut && pret.date_debut.toDate ? pret.date_debut.toDate() : new Date();
-  const nbSemaines = Math.floor((new Date() - dateDebut) / (1000 * 60 * 60 * 24 * 7));
-  const montantDuBrut = pret.montant_initial * (1 + pret.taux_hebdo * nbSemaines);
-  const dejaRembourse = (state.remboursements || [])
-    .filter((r) => r.pret_id === pret.id)
-    .reduce((s, r) => s + Number(r.montant || 0), 0);
-  return Math.max(0, montantDuBrut - dejaRembourse);
-}
-function getStatutContrat(contrat, versements) {
-  if (versements.length >= 31) return { texte: 'Terminé', classe: 'ok' };
-  if (versements.length === 0) return { texte: 'À démarrer', classe: 'due' };
-
-  const dernier = versements.reduce((a, b) => (a.jour_numero > b.jour_numero ? a : b));
-  const dateVersement = dernier.date && dernier.date.toDate ? dernier.date.toDate() : null;
-  if (!dateVersement) return { texte: 'À jour', classe: 'due' };
-
-  const diffJours = Math.floor((new Date() - dateVersement) / (1000 * 60 * 60 * 24));
-  if (diffJours >= 2) return { texte: 'En retard', classe: 'late' };
-  if (diffJours >= 1) return { texte: 'À jour', classe: 'due' };
-  return { texte: "Payé aujourd'hui", classe: 'ok' };
-}
-
-// --- Encaissement sur un contrat existant ---
-function ouvrirPaiement(contratId) {
-  const contrat = state.contracts.find((c) => c.id === contratId);
-  if (!contrat) return;
-  const versements = state.payments.filter((p) => p.contract_id === contratId);
-  const prochainJour = versements.length + 1;
-
-  const montant = prompt(`Montant reçu de ${contrat.membre_nom} (jour ${prochainJour}/31) :`);
-  if (montant === null) return;
-  const montantNum = parseFloat(montant);
-  if (isNaN(montantNum) || montantNum <= 0) {
-    notifier('Montant invalide.', 'erreur');
-    return;
-  }
-  enregistrerVersement(contrat, montantNum, prochainJour);
-}
-
-async function enregistrerVersement(contrat, montant, jourNumero) {
-  try {
-    await addDoc(collection(db, 'payments'), {
-      contract_id: contrat.id,
-      collecteur_id: state.currentCollecteurData.uid,
-      membre_id: contrat.membre_id,
-      montant,
-      jour_numero: jourNumero,
-      statut: 'collecte',
-      date: serverTimestamp(),
-    });
-
-    if (jourNumero >= 31) {
-      await updateDoc(doc(db, 'contracts', contrat.id), { statut: 'cloture' });
-    }
-
-    notifier('Versement enregistré.', 'succes');
-    afficherRecu({ nom: contrat.membre_nom, montant, jour: jourNumero, date: new Date() });
-  } catch (err) {
-    console.error(err);
-    notifier('Erreur : ' + err.message, 'erreur');
-  }
-}
-function ouvrirRemboursementPret(pretId) {
-  const pret = state.prets.find((p) => p.id === pretId);
-  if (!pret) return;
-  const montantDu = calculerMontantDuPret(pret);
-  const montant = prompt(`Montant dû : ${formatGNF(montantDu)}\nMontant remboursé aujourd'hui :`);
-  if (montant === null) return;
-  const montantNum = parseFloat(montant);
-  if (isNaN(montantNum) || montantNum <= 0) {
-    notifier('Montant invalide.', 'erreur');
-    return;
-  }
-  enregistrerRemboursement(pret, montantNum, montantDu);
-}
-
-async function enregistrerRemboursement(pret, montant, montantDuAvant) {
-  try {
-    await addDoc(collection(db, 'remboursements_prets'), {
-      pret_id: pret.id,
-      membre_id: pret.membre_id,
-      collecteur_id: state.currentCollecteurData.uid,
-      enregistre_par_role: 'collecteur',
-      enregistre_par_uid: state.currentCollecteurData.uid,
-      montant,
-      date: serverTimestamp(),
-    });
-    if (montant >= montantDuAvant) {
-      await updateDoc(doc(db, 'prets', pret.id), { statut: 'rembourse' });
-      notifier('Prêt entièrement remboursé.', 'succes');
-    } else {
-      notifier('Remboursement enregistré.', 'succes');
-    }
-  } catch (err) {
-    console.error(err);
-    notifier('Erreur : ' + err.message, 'erreur');
-  }
-}
-
-// --- Nouveau membre : création DIRECTE du compte (plus de validation PDG) ---
-document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
-  ouvrirModal(`
-    <h2>Nouveau membre</h2>
-    <p class="subtitle-sm">Créez le compte du membre et enregistrez son 1er versement (commission). Un mot de passe est généré automatiquement à partir de son numéro de téléphone.</p>
-      <form id="form-nouveau-membre">
-        <div class="field-row">
-          <label>Nom complet du membre</label>
-          <input type="text" name="nom" required />
-        </div>
-        <div class="field-row">
-          <label>Téléphone (identifiant de connexion)</label>
-          <input type="tel" name="telephone" required />
-        </div>
-        <div class="field-row">
-          <label>Montant du versement quotidien (GNF)</label>
-          <input type="number" name="montantJour" min="1" required />
-        </div>
-        <div class="field-row">
-          <label>Commission encaissée aujourd'hui (jour 1, GNF)</label>
-          <input type="number" name="commission" min="1" required />
-        </div>
-        <div class="modal-actions">
-          <button type="button" class="secondary" id="modal-annuler-membre" style="flex:1;">Annuler</button>
-          <button type="submit" style="flex:1;">Créer le compte</button>
-        </div>
-      </form>
-  `);
-  document.getElementById('modal-annuler-membre').addEventListener('click', fermerModal);
-  document.getElementById('form-nouveau-membre').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const fd = new FormData(e.target);
-    const nom = fd.get('nom').trim();
-    const telephone = fd.get('telephone').trim();
-    const password = genererMotDePasseMembre(telephone);
-    const montantJour = Number(fd.get('montantJour'));
-    const commission = Number(fd.get('commission'));
-
-    try {
-      const emailTechnique = telephoneVersEmailTechnique(telephone);
-      const uid = await creerCompteSecondaire(emailTechnique, password);
-
-      await setDoc(doc(db, 'users', uid), {
-        role: 'membre',
-        nom, telephone,
-        parrain_id: state.currentCollecteurData.uid,
-        statut: 'actif',
-        date_creation: serverTimestamp(),
-      });
-
-      const contratRef = await addDoc(collection(db, 'contracts'), {
-        membre_id: uid,
-        membre_nom: nom,
-        collecteur_id: state.currentCollecteurData.uid,
-        statut: 'actif',
-        commission,
-        montant_mise: montantJour,
-        date_debut: new Date().toISOString(),
-      });
-
-      await addDoc(collection(db, 'payments'), {
-        contract_id: contratRef.id,
-        collecteur_id: state.currentCollecteurData.uid,
-        membre_id: uid,
-        montant: commission,
-        jour_numero: 1,
-        statut: 'collecte',
-        date: serverTimestamp(),
-      });
-
-      fermerModal();
-      afficherIdentifiants({ nom, telephone, password });
-    } catch (err) {
-      console.error(err);
-      notifier('Erreur : ' + err.message, 'erreur');
-    }
-  });
-});
-
-// --- Reçu ---
-function afficherRecu(data) {
-  const overlay = document.createElement('div');
-  Object.assign(overlay.style, {
-    position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
-    background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center',
-    justifyContent: 'center', zIndex: 1000,
-  });
-  const recu = document.createElement('div');
-  Object.assign(recu.style, {
-    background: 'white', borderRadius: '12px', padding: '24px',
-    width: '85%', maxWidth: '350px', textAlign: 'center',
-  });
-  recu.innerHTML = `
-    <h2 style="color:#0d6efd;">CPCT-TINA</h2>
-    <p style="color:#666; margin-bottom:12px;">Reçu d'encaissement</p>
-    <hr>
-    <p style="margin:12px 0;"><strong>${data.nom}</strong></p>
-    <p style="font-size:22px; color:#198754; font-weight:bold;">${formatGNF(data.montant)}</p>
-    <p>Jour ${data.jour} / 31</p>
-    <p style="color:#999; font-size:13px; margin-top:12px;">
-      ${data.date.toLocaleDateString('fr-FR')} à ${data.date.toLocaleTimeString('fr-FR')}
-    </p>
-    <hr>
-    <p style="font-size:12px; color:#aaa;">Faites une capture d'écran de ce reçu</p>
-    <button style="margin-top:16px;" id="fermer-recu">Fermer</button>
-  `;
-  overlay.appendChild(recu);
-  document.body.appendChild(overlay);
-  recu.querySelector('#fermer-recu').addEventListener('click', () => overlay.remove());
-}
-
-// --- Identifiants du nouveau membre (à transmettre oralement) ---
-function afficherIdentifiants(data) {
-  const overlay = document.createElement('div');
-  Object.assign(overlay.style, {
-    position: 'fixed', top: 0, left: 0, width: '100%', height: '100%',
-    background: 'rgba(0,0,0,0.6)', display: 'flex', alignItems: 'center',
-    justifyContent: 'center', zIndex: 1000,
-  });
-  const carte = document.createElement('div');
-  Object.assign(carte.style, {
-    background: 'white', borderRadius: '12px', padding: '24px',
-    width: '85%', maxWidth: '350px', textAlign: 'center',
-  });
-  carte.innerHTML = `
-    <h2 style="color:#0d6efd;">Identifiants du membre</h2>
-    <p style="color:#666; margin-bottom:12px;">À transmettre oralement à ${data.nom}</p>
-    <hr>
-    <p style="margin:12px 0;">Téléphone :<br><strong style="font-size:18px;">${data.telephone}</strong></p>
-    <p style="margin:12px 0;">Mot de passe :<br><strong style="font-size:22px; color:#198754;">${data.password}</strong></p>
-    <hr>
-    <p style="font-size:12px; color:#c0392b;">⚠️ Ce mot de passe ne sera plus jamais affiché ici. Transmettez-le maintenant.</p>
-    <button style="margin-top:16px;" id="fermer-identifiants">J'ai transmis les identifiants</button>
-  `;
-  overlay.appendChild(carte);
-  document.body.appendChild(overlay);
-  carte.querySelector('#fermer-identifiants').addEventListener('click', () => overlay.remove());
-}
-
-// --- Détails d'un membre (au clic sur son nom) ---
-async function afficherDetailsMembre(contrat) {
-  const versements = state.payments.filter((p) => p.contract_id === contrat.id);
-  const versementsConfirmes = versements.filter((p) => p.statut === 'confirme');
-  const versementsNonConfirmes = versements.filter((p) => p.statut !== 'confirme');
-  const totalConfirme = versementsConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
-  const totalNonConfirme = versementsNonConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
-  const commissionConfirmee = versementsConfirmes
-    .filter((p) => p.jour_numero === 1)
-    .reduce((s, p) => s + Number(p.montant || 0), 0);
-  const solde = totalConfirme - commissionConfirmee;
-
-  let telephone = '—';
-  try {
-    const membreSnap = await getDoc(doc(db, 'users', contrat.membre_id));
-    if (membreSnap.exists()) telephone = membreSnap.data().telephone || '—';
-  } catch (e) { /* ignore */ }
-
-  ouvrirModal(`
-    <h2>${contrat.membre_nom}</h2>
-    <p class="subtitle-sm">Téléphone : ${telephone}</p>
-    <div class="soldes-row"><span>Solde actuel : <b>${formatGNF(solde > 0 ? solde : 0)}</b></span></div>
-    <div class="soldes-row"><span>Versement confirmé : <b>${formatGNF(totalConfirme)}</b></span></div>
-    <div class="soldes-row"><span>Versement non confirmé : <b>${formatGNF(totalNonConfirme)}</b></span></div>
-    <div class="soldes-row"><span>Montant du versement quotidien : <b>${formatGNF(contrat.montant_mise || 0)}</b></span></div>
-    <div class="soldes-row"><span>Jours payés : <b>${versements.length}/31</b></span></div>
-    <div class="modal-actions">
-      <button type="button" class="secondary" id="modal-fermer-details" style="flex:1;">Fermer</button>
-    </div>
-  `);
-  document.getElementById('modal-fermer-details').addEventListener('click', fermerModal);
-}
-
-// --- Modal utilitaires ---
-function ouvrirModal(html) {
-  document.getElementById('modal-content').innerHTML = html;
-  const overlay = document.getElementById('modal-overlay');
-  overlay.classList.remove('hidden');
-  overlay.style.display = 'flex';
-}
-function fermerModal() {
-  const overlay = document.getElementById('modal-overlay');
-  overlay.classList.add('hidden');
-  overlay.style.display = 'none';
-  document.getElementById('modal-content').innerHTML = '';
-}
-document.getElementById('modal-overlay').addEventListener('click', (e) => {
-  if (e.target.id === 'modal-overlay') fermerModal();
-});
-
-demarrer();
