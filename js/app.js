@@ -281,6 +281,7 @@ function renderMembersList() {
   container.innerHTML = '';
 
   const contratsActifs = state.contracts.filter((c) => c.statut === 'actif');
+  const versementsConfirmesTous = state.payments.filter((p) => p.statut === 'confirme');
 
   if (contratsActifs.length === 0) {
     container.innerHTML = '<p style="color:#999;">Aucun membre assigné.</p>';
