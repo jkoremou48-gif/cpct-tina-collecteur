@@ -291,7 +291,10 @@ function renderMembersList() {
   contratsActifs.forEach((contrat) => {
     const versements = state.payments.filter((p) => p.contract_id === contrat.id);
     const joursPayes = versements.length;
-    const statut = getStatutContrat(contrat, versements);
+    let statut = getStatutContrat(contrat, versements);
+    if (calculerStatutContrat(contrat, versementsConfirmesTous) === 'inactif') {
+      statut = { texte: 'Inactif', classe: 'late' };
+    }
     const pret = (state.prets || []).find((p) => p.contract_id === contrat.id && p.statut === 'actif');
 
     const row = document.createElement('div');
