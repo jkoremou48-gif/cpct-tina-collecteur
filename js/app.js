@@ -21,7 +21,7 @@ import {
   creerCompteSecondaire,
 } from "./firebase-config.js";
 
-import { genererCodeParrain, formatGNF, formatDate, notifier } from "./utils.js";
+import { genererCodeParrain, formatGNF, formatDate, notifier, calculerStatutContrat } from "./utils.js";
 
 const TAUX_COMMISSION = 0.30;
 
