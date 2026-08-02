@@ -275,6 +275,27 @@ function renderCollecteurHeader() {
   document.getElementById('soldeCC').textContent = formatGNF(CC);
   }
 
+// --- Épargne nette d'un contrat quelconque (actif ou clôturé) ---
+function calculerEpargneNetteContrat(contrat) {
+  const versements = state.payments.filter((p) => p.contract_id === contrat.id);
+  const totalConfirme = versements
+    .filter((p) => p.statut === 'confirme' && p.jour_numero > 1)
+    .reduce((s, p) => s + Number(p.montant || 0), 0);
+  const pretsActifs = state.prets.filter((p) => p.contract_id === contrat.id && p.statut === 'actif');
+  const totalPretsEnCours = pretsActifs.reduce((s, p) => s + Number(p.montant_initial || 0), 0);
+  return totalConfirme - totalPretsEnCours;
+}
+
+// --- Anciens contrats clôturés non soldés d'un membre, en excluant un contrat donné ---
+function trouverContratsNonSoldes(membreId, contratExclureId) {
+  return state.contracts.filter((c) =>
+    c.membre_id === membreId &&
+    c.statut === 'cloture' &&
+    c.id !== contratExclureId &&
+    !c.epargne_soldee
+  );
+}
+
 // --- Liste des membres (via leurs contrats) ---
 // Affiche pour chaque membre son contrat le plus récent (actif OU clôturé).
 // Un contrat clôturé affiche "Nouveau contrat" à la place d'"Encaisser".
@@ -312,6 +333,9 @@ function renderMembersList() {
     }
     const pret = (state.prets || []).find((p) => p.contract_id === contrat.id && p.statut === 'actif');
 
+    const contratsNonSoldes = trouverContratsNonSoldes(contrat.membre_id, contrat.id);
+    const totalNonSolde = contratsNonSoldes.reduce((s, c) => s + Math.max(0, calculerEpargneNetteContrat(c)), 0);
+
     const row = document.createElement('div');
     row.className = 'member-row';
     row.innerHTML = `
@@ -319,6 +343,7 @@ function renderMembersList() {
         <strong style="cursor:pointer; text-decoration:underline;" data-membre="${contrat.membre_id}">${contrat.membre_nom || 'Membre'}</strong><br>
         <small>Jour ${joursPayes}/31</small>
         ${pret ? `<br><small style="color:#c0392b;">Prêt en cours : ${formatGNF(calculerMontantDuPret(pret))}</small>` : ''}
+        ${totalNonSolde > 0 ? `<br><small style="color:#c0392b; font-weight:bold;">Contrat non soldé : ${formatGNF(totalNonSolde)}</small>` : ''}
       </div>
       <div style="text-align:right;">
         <span class="badge ${statut.classe}">${statut.texte}</span><br>
@@ -685,6 +710,9 @@ async function afficherDetailsMembre(contrat) {
     if (membreSnap.exists()) telephone = membreSnap.data().telephone || '—';
   } catch (e) { /* ignore */ }
 
+  const contratsNonSoldes = trouverContratsNonSoldes(contrat.membre_id, contrat.id);
+  const totalNonSolde = contratsNonSoldes.reduce((s, c) => s + Math.max(0, calculerEpargneNetteContrat(c)), 0);
+
   ouvrirModal(`
     <h2>${contrat.membre_nom}</h2>
     <p class="subtitle-sm">Téléphone : ${telephone}</p>
@@ -693,6 +721,7 @@ async function afficherDetailsMembre(contrat) {
     <div class="soldes-row"><span>Versement non confirmé : <b>${formatGNF(totalNonConfirme)}</b></span></div>
     <div class="soldes-row"><span>Montant du versement quotidien : <b>${formatGNF(contrat.montant_mise || 0)}</b></span></div>
     <div class="soldes-row"><span>Jours payés : <b>${versements.length}/31</b></span></div>
+    ${totalNonSolde > 0 ? `<div class="soldes-row"><span style="color:#c0392b;">Contrat(s) non soldé(s)</span><span style="color:#c0392b;"><b>${formatGNF(totalNonSolde)}</b></span></div>` : ""}
     <div class="modal-actions">
       <button type="button" class="secondary" id="modal-fermer-details" style="flex:1;">Fermer</button>
     </div>
