@@ -12,6 +12,8 @@ import {
 import { genererCodeParrain, formatGNF, formatDate, notifier, calculerStatutContrat } from "./utils.js";
 
 const TAUX_COMMISSION = 0.30;
+const PART_INTERET_COLLECTEUR = 0.30;
+const PART_INTERET_PDG = 0.70;
 
 const state = {
   currentUser: null,
@@ -22,6 +24,7 @@ const state = {
   withdrawalRequests: [],
   prets: [],
   remboursements: [],
+  interetsPartages: [],
   unsubscribers: [],
 };
 let creationEnCours = false;
@@ -197,7 +200,14 @@ function lancerDashboard() {
       renderAll();
     }
   );
-  state.unsubscribers.push(unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements, unsubRetraits);
+  const unsubInterets = onSnapshot(
+    query(collection(db, 'interets_prets_repartis'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.interetsPartages = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
+  state.unsubscribers.push(unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements, unsubRetraits, unsubInterets);
 }
 
 function renderAll() {
@@ -224,7 +234,9 @@ function renderCollecteurHeader() {
 
   const commissionsConfirmees = versementsConfirmes.filter((p) => p.jour_numero === 1);
   const totalCommissionConfirmee = commissionsConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
-  const CC = totalCommissionConfirmee * TAUX_COMMISSION;
+  const commissionInscriptions = totalCommissionConfirmee * TAUX_COMMISSION;
+  const commissionInterets = state.interetsPartages.reduce((s, i) => s + Number(i.montant_collecteur || 0), 0);
+  const CC = commissionInscriptions + commissionInterets;
 
   const soldeTotalEpargnes = versementConfirmeTotal - totalCommissionConfirmee;
 
@@ -247,7 +259,9 @@ function renderCollecteurHeader() {
       <div class="soldes-row"><span>Versement total confirmé : <b id="versementConfirme">0 GNF</b></span></div>
       <div class="soldes-row"><span>Versement non confirmé : <b id="versementNonConfirme">0 GNF</b></span></div>
       <div class="soldes-row"><span>Total collecté (TC) : <b id="soldeTC">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Commission réalisée (30%) : <b id="soldeCC">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission inscriptions (30%) : <b id="soldeCommissionInscriptions">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission intérêts prêts (30%) : <b id="soldeCommissionInterets">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission réalisée (total) : <b id="soldeCC">0 GNF</b></span></div>
     `;
     document.getElementById('commissionAttente').closest('.card').appendChild(situationBloc);
   }
@@ -257,6 +271,8 @@ function renderCollecteurHeader() {
   document.getElementById('versementConfirme').textContent = formatGNF(versementConfirmeTotal);
   document.getElementById('versementNonConfirme').textContent = formatGNF(versementNonConfirmeTotal);
   document.getElementById('soldeTC').textContent = formatGNF(TC);
+  document.getElementById('soldeCommissionInscriptions').textContent = formatGNF(commissionInscriptions);
+  document.getElementById('soldeCommissionInterets').textContent = formatGNF(commissionInterets);
   document.getElementById('soldeCC').textContent = formatGNF(CC);
 }
 
@@ -268,10 +284,15 @@ function calculerEpargneNetteContrat(contrat) {
     .reduce((s, p) => s + Number(p.montant || 0), 0);
 }
 
-// --- Montant dû d'un prêt (capital + 2%/semaine entamée, 1er intérêt facturé dès la validation) ---
-function calculerMontantDuPret(pret) {
+// --- Nombre de semaines entamées depuis le début du prêt (1re semaine comptée dès la validation) ---
+function nbSemainesEntamees(pret) {
   const dateDebut = pret.date_debut && pret.date_debut.toDate ? pret.date_debut.toDate() : new Date();
-  const nbSemaines = Math.floor((new Date() - dateDebut) / (1000 * 60 * 60 * 24 * 7)) + 1;
+  return Math.floor((new Date() - dateDebut) / (1000 * 60 * 60 * 24 * 7)) + 1;
+}
+
+// --- Montant dû d'un prêt (capital + 2%/semaine entamée) ---
+function calculerMontantDuPret(pret) {
+  const nbSemaines = nbSemainesEntamees(pret);
   const montantDuBrut = pret.montant_initial * (1 + pret.taux_hebdo * nbSemaines);
   const dejaRembourse = (state.remboursements || [])
     .filter((r) => r.pret_id === pret.id)
@@ -279,7 +300,7 @@ function calculerMontantDuPret(pret) {
   return Math.max(0, montantDuBrut - dejaRembourse);
 }
 
-// --- Solde disponible = épargne nette - prêt actif non remboursé (le seul montant réellement retirable) ---
+// --- Solde disponible = épargne nette - prêt actif non remboursé ---
 function calculerSoldeDisponible(contrat) {
   const epargneNette = calculerEpargneNetteContrat(contrat);
   const pret = (state.prets || []).find((p) => p.contract_id === contrat.id && p.statut === 'actif');
@@ -514,8 +535,15 @@ function ouvrirRemboursementPret(pretId) {
   enregistrerRemboursement(pret, montantNum, montantDu);
 }
 
+// --- Enregistre un remboursement + reconnaît et répartit 30/70 la part d'intérêt couverte ---
 async function enregistrerRemboursement(pret, montant, montantDuAvant) {
   try {
+    const nbSemaines = nbSemainesEntamees(pret);
+    const interetAccumule = pret.montant_initial * pret.taux_hebdo * nbSemaines;
+    const interetDejaReconnu = Number(pret.interet_deja_reconnu || 0);
+    const interetNonReconnu = Math.max(0, interetAccumule - interetDejaReconnu);
+    const interetReconnuMaintenant = Math.min(montant, interetNonReconnu);
+
     await addDoc(collection(db, 'remboursements_prets'), {
       pret_id: pret.id,
       membre_id: pret.membre_id,
@@ -525,6 +553,23 @@ async function enregistrerRemboursement(pret, montant, montantDuAvant) {
       montant,
       date: serverTimestamp(),
     });
+
+    if (interetReconnuMaintenant > 0) {
+      const montantCollecteur = interetReconnuMaintenant * PART_INTERET_COLLECTEUR;
+      const montantPdg = interetReconnuMaintenant * PART_INTERET_PDG;
+      await addDoc(collection(db, 'interets_prets_repartis'), {
+        pret_id: pret.id,
+        membre_id: pret.membre_id,
+        collecteur_id: state.currentCollecteurData.uid,
+        montant_collecteur: montantCollecteur,
+        montant_pdg: montantPdg,
+        date: serverTimestamp(),
+      });
+      await updateDoc(doc(db, 'prets', pret.id), {
+        interet_deja_reconnu: interetDejaReconnu + interetReconnuMaintenant,
+      });
+    }
+
     if (montant >= montantDuAvant) {
       await updateDoc(doc(db, 'prets', pret.id), { statut: 'rembourse' });
       notifier('Prêt entièrement remboursé.', 'succes');
