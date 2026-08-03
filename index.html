@@ -34,6 +34,8 @@
   .modal-content { background: white; border-radius: 12px; padding: 20px; width: 88%; max-width: 400px; max-height: 85vh; overflow-y: auto; }
   .modal-actions { display: flex; gap: 8px; margin-top: 14px; }
   .modal-actions button { width: auto; flex: 1; }
+  .avatar-collecteur { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; background: #ddd; display: block; margin: 0 auto 10px auto; cursor: pointer; }
+  .avatar-label { display: block; text-align: center; font-size: 12px; color: #0d6efd; cursor: pointer; margin-top: -6px; margin-bottom: 10px; }
 </style>
 </head>
 <body>
@@ -50,9 +52,10 @@
     <p style="color:#666; font-size:13px; margin-top:6px;">Saisissez le code fourni par votre PDG.</p>
     <form id="form-inscription">
       <input type="text" id="inscCode" placeholder="Code (ex: COL-4X7K2)" required style="text-transform:uppercase;">
-      <input type="text" id="inscNom" placeholder="Nom complet" required>
+      <input type="text" id="inscNom" placeholder="Nom et prénom" required>
       <input type="tel" id="inscTelephone" placeholder="Téléphone" required>
       <input type="email" id="inscEmail" placeholder="Email" required>
+      <input type="text" id="inscResidence" placeholder="Résidence" required>
       <input type="password" id="inscPassword" placeholder="Mot de passe (6 caractères min)" required minlength="6">
       <button type="submit">S'inscrire</button>
     </form>
@@ -73,6 +76,9 @@
   <!-- Tableau de bord collecteur -->
   <div id="dashboard" class="hidden">
     <div class="card">
+      <img id="collecteur-avatar" class="avatar-collecteur" src="" alt="Photo de profil" />
+      <label class="avatar-label" for="collecteur-avatar-input">Changer la photo</label>
+      <input type="file" id="collecteur-avatar-input" accept="image/*" class="hidden" />
       <strong id="collectorName">Collecteur</strong>
       <p id="collectorStats" style="color:#666; font-size:14px;"></p>
       <div class="soldes-row">
@@ -100,10 +106,8 @@
   <div id="modal-content" class="modal-content"></div>
 </div>
 
-<script type="module" src="js/firebase-config.js"></script>
-<script type="module" src="js/utils.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
-    <script>eruda.init();</script>
-    <script type="module" src="js/app.js"></script>
+<script>eruda.init();</script>
+<script type="module" src="js/app.js"></script>
 </body>
 </html>
