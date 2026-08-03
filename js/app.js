@@ -6,7 +6,7 @@ import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, doc, getDoc, setDoc, updateDoc,
   addDoc, collection, query, where, orderBy, onSnapshot, serverTimestamp,
-  creerCompteSecondaire,
+  creerCompteSecondaire, uploaderPhotoProfil,
 } from "./firebase-config.js";
 
 import { genererCodeParrain, formatGNF, formatDate, notifier, calculerStatutContrat } from "./utils.js";
@@ -14,6 +14,7 @@ import { genererCodeParrain, formatGNF, formatDate, notifier, calculerStatutCont
 const TAUX_COMMISSION = 0.30;
 const PART_INTERET_COLLECTEUR = 0.30;
 const PART_INTERET_PDG = 0.70;
+const AVATAR_DEFAUT = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='56' height='56'><rect width='56' height='56' fill='%23ddd'/></svg>";
 
 const state = {
   currentUser: null,
@@ -85,6 +86,7 @@ document.getElementById('form-inscription').addEventListener('submit', async (e)
   const nom = document.getElementById('inscNom').value.trim();
   const telephone = document.getElementById('inscTelephone').value.trim();
   const email = document.getElementById('inscEmail').value.trim();
+  const residence = document.getElementById('inscResidence').value.trim();
   const password = document.getElementById('inscPassword').value;
 
   if (!code.startsWith('COL-')) {
@@ -109,7 +111,7 @@ document.getElementById('form-inscription').addEventListener('submit', async (e)
     const cred = await createUserWithEmailAndPassword(auth, email, password);
     const userData = {
       role: 'collecteur',
-      nom, telephone, email,
+      nom, telephone, email, residence,
       code_parrain: codeParrain,
       parrain_id: pdgId,
       statut: 'actif',
@@ -157,8 +159,25 @@ document.getElementById('logoutBtn').addEventListener('click', async () => {
   showOnly(loginScreen);
 });
 
+// --- Photo de profil ---
+document.getElementById('collecteur-avatar-input').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file || !state.currentCollecteurData) return;
+  try {
+    const url = await uploaderPhotoProfil(state.currentCollecteurData.uid, file);
+    await updateDoc(doc(db, 'users', state.currentCollecteurData.uid), { photoURL: url });
+    state.currentCollecteurData.photoURL = url;
+    document.getElementById('collecteur-avatar').src = url;
+    notifier('Photo de profil mise à jour.', 'succes');
+  } catch (err) {
+    console.error(err);
+    notifier("Erreur lors de l'envoi de la photo : " + err.message, 'erreur');
+  }
+});
+
 function lancerDashboard() {
   showOnly(dashboard);
+  document.getElementById('collecteur-avatar').src = state.currentCollecteurData.photoURL || AVATAR_DEFAUT;
   renderCollecteurHeader();
 
   const unsubContracts = onSnapshot(
@@ -276,7 +295,6 @@ function renderCollecteurHeader() {
   document.getElementById('soldeCC').textContent = formatGNF(CC);
 }
 
-// --- Épargne nette d'un contrat : le prêt NE la réduit PAS (règle validée le 2 août) ---
 function calculerEpargneNetteContrat(contrat) {
   const versements = state.payments.filter((p) => p.contract_id === contrat.id);
   return versements
@@ -284,13 +302,11 @@ function calculerEpargneNetteContrat(contrat) {
     .reduce((s, p) => s + Number(p.montant || 0), 0);
 }
 
-// --- Nombre de semaines entamées depuis le début du prêt (1re semaine comptée dès la validation) ---
 function nbSemainesEntamees(pret) {
   const dateDebut = pret.date_debut && pret.date_debut.toDate ? pret.date_debut.toDate() : new Date();
   return Math.floor((new Date() - dateDebut) / (1000 * 60 * 60 * 24 * 7)) + 1;
 }
 
-// --- Montant dû d'un prêt (capital + 2%/semaine entamée) ---
 function calculerMontantDuPret(pret) {
   const nbSemaines = nbSemainesEntamees(pret);
   const montantDuBrut = pret.montant_initial * (1 + pret.taux_hebdo * nbSemaines);
@@ -300,7 +316,6 @@ function calculerMontantDuPret(pret) {
   return Math.max(0, montantDuBrut - dejaRembourse);
 }
 
-// --- Solde disponible = épargne nette - prêt actif non remboursé ---
 function calculerSoldeDisponible(contrat) {
   const epargneNette = calculerEpargneNetteContrat(contrat);
   const pret = (state.prets || []).find((p) => p.contract_id === contrat.id && p.statut === 'actif');
@@ -308,7 +323,6 @@ function calculerSoldeDisponible(contrat) {
   return Math.max(0, epargneNette - pretDu);
 }
 
-// --- Anciens contrats clôturés non soldés d'un membre, en excluant un contrat donné ---
 function trouverContratsNonSoldes(membreId, contratExclureId) {
   return state.contracts.filter((c) =>
     c.membre_id === membreId &&
@@ -535,7 +549,6 @@ function ouvrirRemboursementPret(pretId) {
   enregistrerRemboursement(pret, montantNum, montantDu);
 }
 
-// --- Enregistre un remboursement + reconnaît et répartit 30/70 la part d'intérêt couverte ---
 async function enregistrerRemboursement(pret, montant, montantDuAvant) {
   try {
     const nbSemaines = nbSemainesEntamees(pret);
@@ -588,12 +601,20 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
     <p class="subtitle-sm">Créez le compte du membre et enregistrez son 1er versement (commission). Un mot de passe est généré automatiquement à partir de son numéro de téléphone.</p>
       <form id="form-nouveau-membre">
         <div class="field-row">
-          <label>Nom complet du membre</label>
+          <label>Nom et prénom du membre</label>
           <input type="text" name="nom" required />
         </div>
         <div class="field-row">
           <label>Téléphone (identifiant de connexion)</label>
           <input type="tel" name="telephone" required />
+        </div>
+        <div class="field-row">
+          <label>E-mail</label>
+          <input type="email" name="email" required />
+        </div>
+        <div class="field-row">
+          <label>Résidence</label>
+          <input type="text" name="residence" required />
         </div>
         <div class="field-row">
           <label>Montant du versement quotidien (GNF)</label>
@@ -615,6 +636,8 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
     const fd = new FormData(e.target);
     const nom = fd.get('nom').trim();
     const telephone = fd.get('telephone').trim();
+    const email = fd.get('email').trim();
+    const residence = fd.get('residence').trim();
     const password = genererMotDePasseMembre(telephone);
     const montantJour = Number(fd.get('montantJour'));
     const commission = Number(fd.get('commission'));
@@ -625,7 +648,7 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
 
       await setDoc(doc(db, 'users', uid), {
         role: 'membre',
-        nom, telephone,
+        nom, telephone, email, residence,
         parrain_id: state.currentCollecteurData.uid,
         statut: 'actif',
         date_creation: serverTimestamp(),
@@ -731,9 +754,13 @@ async function afficherDetailsMembre(contrat) {
   const soldeDisponible = calculerSoldeDisponible(contrat);
 
   let telephone = '—';
+  let residence = '—';
   try {
     const membreSnap = await getDoc(doc(db, 'users', contrat.membre_id));
-    if (membreSnap.exists()) telephone = membreSnap.data().telephone || '—';
+    if (membreSnap.exists()) {
+      telephone = membreSnap.data().telephone || '—';
+      residence = membreSnap.data().residence || '—';
+    }
   } catch (e) { /* ignore */ }
 
   const contratsNonSoldes = trouverContratsNonSoldes(contrat.membre_id, contrat.id);
@@ -743,7 +770,7 @@ async function afficherDetailsMembre(contrat) {
 
   ouvrirModal(`
     <h2>${contrat.membre_nom}</h2>
-    <p class="subtitle-sm">Téléphone : ${telephone}</p>
+    <p class="subtitle-sm">Téléphone : ${telephone} · Résidence : ${residence}</p>
     <div class="soldes-row"><span>Épargne nette : <b>${formatGNF(epargneNette > 0 ? epargneNette : 0)}</b></span></div>
     ${pret ? `<div class="soldes-row"><span style="color:#c0392b;">Solde disponible (après prêt)</span><span style="color:#c0392b;"><b>${formatGNF(soldeDisponible)}</b></span></div>` : ''}
     <div class="soldes-row"><span>Versement confirmé : <b>${formatGNF(totalConfirme)}</b></span></div>
