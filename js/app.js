@@ -6,7 +6,7 @@ import {
   auth, db, onAuthStateChanged, signInWithEmailAndPassword,
   createUserWithEmailAndPassword, signOut, doc, getDoc, setDoc, updateDoc,
   addDoc, collection, query, where, orderBy, onSnapshot, serverTimestamp,
-  creerCompteSecondaire, uploaderPhotoProfil,
+  creerCompteSecondaire, uploaderPhotoProfil, changerMotDePasse,
 } from "./firebase-config.js";
 
 import { genererCodeParrain, formatGNF, formatDate, notifier, calculerStatutContrat } from "./utils.js";
@@ -176,10 +176,74 @@ document.getElementById('collecteur-avatar-input').addEventListener('change', as
   }
 });
 
+// --- Changement de mot de passe ---
+function ajouterBoutonChangerMotDePasse() {
+  if (document.getElementById('btn-changer-mdp')) return;
+  const btnLogout = document.getElementById('logoutBtn');
+  if (!btnLogout) return;
+  btnLogout.insertAdjacentHTML(
+    'beforebegin',
+    `<button type="button" id="btn-changer-mdp" class="secondary" style="width:auto; margin-right:8px;">Changer mon mot de passe</button>`
+  );
+  document.getElementById('btn-changer-mdp').addEventListener('click', ouvrirChangementMotDePasse);
+}
+
+function ouvrirChangementMotDePasse() {
+  ouvrirModal(`
+    <h2>Changer mon mot de passe</h2>
+    <p class="subtitle-sm">Confirmez votre mot de passe actuel puis saisissez le nouveau.</p>
+    <form id="form-changer-mdp">
+      <div class="field-row">
+        <label>Mot de passe actuel</label>
+        <input type="password" name="ancien" required />
+      </div>
+      <div class="field-row">
+        <label>Nouveau mot de passe (6 caractères min)</label>
+        <input type="password" name="nouveau" minlength="6" required />
+      </div>
+      <div class="field-row">
+        <label>Confirmer le nouveau mot de passe</label>
+        <input type="password" name="confirmation" minlength="6" required />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="modal-annuler-mdp" style="flex:1;">Annuler</button>
+        <button type="submit" style="flex:1;">Confirmer</button>
+      </div>
+    </form>
+  `);
+  document.getElementById('modal-annuler-mdp').addEventListener('click', fermerModal);
+  document.getElementById('form-changer-mdp').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const ancien = fd.get('ancien');
+    const nouveau = fd.get('nouveau');
+    const confirmation = fd.get('confirmation');
+
+    if (nouveau !== confirmation) {
+      notifier('Les deux mots de passe ne correspondent pas.', 'erreur');
+      return;
+    }
+
+    try {
+      await changerMotDePasse(state.currentCollecteurData.email, ancien, nouveau);
+      notifier('Mot de passe modifié avec succès.', 'succes');
+      fermerModal();
+    } catch (err) {
+      console.error(err);
+      if (err.code === 'auth/wrong-password' || err.code === 'auth/invalid-credential') {
+        notifier('Mot de passe actuel incorrect.', 'erreur');
+      } else {
+        notifier('Erreur : ' + err.message, 'erreur');
+      }
+    }
+  });
+}
+
 function lancerDashboard() {
   showOnly(dashboard);
   document.getElementById('collecteur-avatar').src = state.currentCollecteurData.photoURL || AVATAR_DEFAUT;
   renderCollecteurHeader();
+  ajouterBoutonChangerMotDePasse();
 
   const unsubContracts = onSnapshot(
     query(collection(db, 'contracts'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
@@ -275,7 +339,6 @@ function renderCollecteurHeader() {
   const totalCommissionNonConfirmee = commissionsNonConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
   const commissionEnAttente = totalCommissionNonConfirmee * TAUX_COMMISSION;
 
-  // --- Commission déjà retirée / en attente de retrait ---
   const retraitsCommissionConfirmes = state.retraitsCommission.filter((r) => r.statut === 'confirme');
   const retraitsCommissionEnAttente = state.retraitsCommission.filter((r) => r.statut === 'en_attente');
   const totalRetraitCommissionConfirme = retraitsCommissionConfirmes.reduce((s, r) => s + Number(r.montant || 0), 0);
