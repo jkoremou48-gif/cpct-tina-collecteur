@@ -26,6 +26,7 @@ const state = {
   prets: [],
   remboursements: [],
   interetsPartages: [],
+  retraitsCommission: [],
   unsubscribers: [],
 };
 let creationEnCours = false;
@@ -226,7 +227,18 @@ function lancerDashboard() {
       renderAll();
     }
   );
-  state.unsubscribers.push(unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements, unsubRetraits, unsubInterets);
+  const unsubRetraitsCommission = onSnapshot(
+    query(
+      collection(db, 'retraits_commission'),
+      where('beneficiaire_role', '==', 'collecteur'),
+      where('collecteur_id', '==', state.currentCollecteurData.uid)
+    ),
+    (snap) => {
+      state.retraitsCommission = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
+  state.unsubscribers.push(unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements, unsubRetraits, unsubInterets, unsubRetraitsCommission);
 }
 
 function renderAll() {
@@ -263,6 +275,13 @@ function renderCollecteurHeader() {
   const totalCommissionNonConfirmee = commissionsNonConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
   const commissionEnAttente = totalCommissionNonConfirmee * TAUX_COMMISSION;
 
+  // --- Commission déjà retirée / en attente de retrait ---
+  const retraitsCommissionConfirmes = state.retraitsCommission.filter((r) => r.statut === 'confirme');
+  const retraitsCommissionEnAttente = state.retraitsCommission.filter((r) => r.statut === 'en_attente');
+  const totalRetraitCommissionConfirme = retraitsCommissionConfirmes.reduce((s, r) => s + Number(r.montant || 0), 0);
+  const totalRetraitCommissionEnAttente = retraitsCommissionEnAttente.reduce((s, r) => s + Number(r.montant || 0), 0);
+  const commissionDisponibleRetrait = Math.max(0, CC - totalRetraitCommissionConfirme - totalRetraitCommissionEnAttente);
+
   document.getElementById('collectorStats').textContent = `${state.contracts.length} contrat(s) actif(s)`;
   document.getElementById('commissionConfirmee').textContent = formatGNF(CC);
   document.getElementById('commissionAttente').textContent = formatGNF(commissionEnAttente);
@@ -281,8 +300,14 @@ function renderCollecteurHeader() {
       <div class="soldes-row"><span>Commission inscriptions (30%) : <b id="soldeCommissionInscriptions">0 GNF</b></span></div>
       <div class="soldes-row"><span>Commission intérêts prêts (30%) : <b id="soldeCommissionInterets">0 GNF</b></span></div>
       <div class="soldes-row"><span>Commission réalisée (total) : <b id="soldeCC">0 GNF</b></span></div>
+      <hr style="margin:10px 0; border:none; border-top:1px solid #eee;">
+      <div class="soldes-row"><span>Déjà retiré : <b id="soldeRetraitCommissionConfirme">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Retrait en attente de validation PDG : <b id="soldeRetraitCommissionAttente">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission disponible au retrait : <b id="soldeCommissionDisponible">0 GNF</b></span></div>
+      <button type="button" id="btn-demander-retrait-commission" style="margin-top:10px;">Demander le retrait de ma commission</button>
     `;
     document.getElementById('commissionAttente').closest('.card').appendChild(situationBloc);
+    document.getElementById('btn-demander-retrait-commission').addEventListener('click', ouvrirDemandeRetraitCommission);
   }
 
   document.getElementById('soldeTotalEpargnes').textContent = formatGNF(soldeTotalEpargnes > 0 ? soldeTotalEpargnes : 0);
@@ -293,6 +318,61 @@ function renderCollecteurHeader() {
   document.getElementById('soldeCommissionInscriptions').textContent = formatGNF(commissionInscriptions);
   document.getElementById('soldeCommissionInterets').textContent = formatGNF(commissionInterets);
   document.getElementById('soldeCC').textContent = formatGNF(CC);
+  document.getElementById('soldeRetraitCommissionConfirme').textContent = formatGNF(totalRetraitCommissionConfirme);
+  document.getElementById('soldeRetraitCommissionAttente').textContent = formatGNF(totalRetraitCommissionEnAttente);
+  document.getElementById('soldeCommissionDisponible').textContent = formatGNF(commissionDisponibleRetrait);
+
+  const btnRetrait = document.getElementById('btn-demander-retrait-commission');
+  if (btnRetrait) {
+    btnRetrait.disabled = commissionDisponibleRetrait <= 0;
+    btnRetrait.dataset.disponible = commissionDisponibleRetrait;
+  }
+}
+
+function ouvrirDemandeRetraitCommission() {
+  const disponible = Number(document.getElementById('btn-demander-retrait-commission').dataset.disponible || 0);
+  if (disponible <= 0) {
+    notifier('Aucune commission disponible pour un retrait actuellement.', 'erreur');
+    return;
+  }
+  ouvrirModal(`
+    <h2>Demander le retrait de ma commission</h2>
+    <p class="subtitle-sm">Commission disponible : <b>${formatGNF(disponible)}</b>. Cette demande sera envoyée au PDG pour validation.</p>
+    <form id="form-retrait-commission">
+      <div class="field-row">
+        <label>Montant à retirer (GNF)</label>
+        <input type="number" name="montant" min="1" max="${disponible}" required />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="modal-annuler-retrait-commission" style="flex:1;">Annuler</button>
+        <button type="submit" style="flex:1;">Envoyer la demande</button>
+      </div>
+    </form>
+  `);
+  document.getElementById('modal-annuler-retrait-commission').addEventListener('click', fermerModal);
+  document.getElementById('form-retrait-commission').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const montant = Number(new FormData(e.target).get('montant'));
+    if (montant > disponible) {
+      notifier('Montant supérieur à la commission disponible.', 'erreur');
+      return;
+    }
+    try {
+      await addDoc(collection(db, 'retraits_commission'), {
+        beneficiaire_role: 'collecteur',
+        collecteur_id: state.currentCollecteurData.uid,
+        collecteur_nom: state.currentCollecteurData.nom,
+        montant,
+        statut: 'en_attente',
+        date: serverTimestamp(),
+      });
+      notifier('Demande de retrait envoyée au PDG.', 'succes');
+      fermerModal();
+    } catch (err) {
+      console.error(err);
+      notifier('Erreur : ' + err.message, 'erreur');
+    }
+  });
 }
 
 function calculerEpargneNetteContrat(contrat) {
