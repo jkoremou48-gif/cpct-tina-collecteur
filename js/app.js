@@ -88,10 +88,16 @@ document.getElementById('form-inscription').addEventListener('submit', async (e)
   const telephone = document.getElementById('inscTelephone').value.trim();
   const email = document.getElementById('inscEmail').value.trim();
   const residence = document.getElementById('inscResidence').value.trim();
+  const prefecture = document.getElementById('inscPrefecture').value.trim();
+  const sousPrefecture = document.getElementById('inscSousPrefecture').value.trim();
   const password = document.getElementById('inscPassword').value;
 
   if (!code.startsWith('COL-')) {
     inscError.textContent = "Ce code ne correspond pas à un code collecteur (COL-...).";
+    return;
+  }
+  if (!prefecture) {
+    inscError.textContent = "Veuillez choisir votre préfecture ou commune.";
     return;
   }
 
@@ -113,6 +119,7 @@ document.getElementById('form-inscription').addEventListener('submit', async (e)
     const userData = {
       role: 'collecteur',
       nom, telephone, email, residence,
+      prefecture, sous_prefecture: sousPrefecture,
       code_parrain: codeParrain,
       parrain_id: pdgId,
       statut: 'actif',
