@@ -36,6 +36,7 @@
   .modal-actions button { width: auto; flex: 1; }
   .avatar-collecteur { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; background: #ddd; display: block; margin: 0 auto 10px auto; cursor: pointer; }
   .avatar-label { display: block; text-align: center; font-size: 12px; color: #0d6efd; cursor: pointer; margin-top: -6px; margin-bottom: 10px; }
+  .field-label { display:block; font-size:12px; color:#666; margin-top:10px; margin-bottom:-4px; }
 </style>
 </head>
 <body>
@@ -56,6 +57,53 @@
       <input type="tel" id="inscTelephone" placeholder="Téléphone" required>
       <input type="email" id="inscEmail" placeholder="Email" required>
       <input type="text" id="inscResidence" placeholder="Résidence" required>
+
+      <label class="field-label" for="inscPrefecture">Préfecture / Commune (zone d'activité)</label>
+      <select id="inscPrefecture" required>
+        <option value="">-- Choisir --</option>
+        <option value="Beyla">Beyla</option>
+        <option value="Boffa">Boffa</option>
+        <option value="Boké">Boké</option>
+        <option value="Coyah">Coyah</option>
+        <option value="Dabola">Dabola</option>
+        <option value="Dalaba">Dalaba</option>
+        <option value="Dinguiraye">Dinguiraye</option>
+        <option value="Dixinn">Dixinn (commune de Conakry)</option>
+        <option value="Dubréka">Dubréka</option>
+        <option value="Faranah">Faranah</option>
+        <option value="Forécariah">Forécariah</option>
+        <option value="Fria">Fria</option>
+        <option value="Gaoual">Gaoual</option>
+        <option value="Guéckédou">Guéckédou</option>
+        <option value="Kaloum">Kaloum (commune de Conakry)</option>
+        <option value="Kankan">Kankan</option>
+        <option value="Kérouané">Kérouané</option>
+        <option value="Kindia">Kindia</option>
+        <option value="Kissidougou">Kissidougou</option>
+        <option value="Koubia">Koubia</option>
+        <option value="Koundara">Koundara</option>
+        <option value="Kouroussa">Kouroussa</option>
+        <option value="Labé">Labé</option>
+        <option value="Lélouma">Lélouma</option>
+        <option value="Lola">Lola</option>
+        <option value="Macenta">Macenta</option>
+        <option value="Mali">Mali</option>
+        <option value="Mamou">Mamou</option>
+        <option value="Mandiana">Mandiana</option>
+        <option value="Matam">Matam (commune de Conakry)</option>
+        <option value="Matoto">Matoto (commune de Conakry)</option>
+        <option value="Nzérékoré">Nzérékoré</option>
+        <option value="Pita">Pita</option>
+        <option value="Ratoma">Ratoma (commune de Conakry)</option>
+        <option value="Siguiri">Siguiri</option>
+        <option value="Télimélé">Télimélé</option>
+        <option value="Tougué">Tougué</option>
+        <option value="Yomou">Yomou</option>
+      </select>
+
+      <label class="field-label" for="inscSousPrefecture">Sous-préfecture / Quartier</label>
+      <input type="text" id="inscSousPrefecture" placeholder="Ex : Wonkifong, ou nom du quartier" required>
+
       <input type="password" id="inscPassword" placeholder="Mot de passe (6 caractères min)" required minlength="6">
       <button type="submit">S'inscrire</button>
     </form>
