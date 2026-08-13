@@ -284,8 +284,15 @@ function lancerDashboard() {
     state.remboursements = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     renderAll();
   });
+  // NOTE (13 août 2026) : filtre ajouté sur collecteur_id — avant, ce listener
+  // chargeait les demandes de retrait de TOUS les collecteurs, pas seulement
+  // celles des membres de ce collecteur.
   const unsubRetraits = onSnapshot(
-    query(collection(db, 'withdrawalRequests'), where('statut', '==', 'en_attente')),
+    query(
+      collection(db, 'withdrawalRequests'),
+      where('statut', '==', 'en_attente'),
+      where('collecteur_id', '==', state.currentCollecteurData.uid)
+    ),
     (snap) => {
       state.withdrawalRequests = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       renderAll();
@@ -607,7 +614,9 @@ async function enregistrerVersement(contrat, montantSaisi, jourDepart, joursRest
         membre_id: contrat.membre_id,
         montant: montantJournalier,
         jour_numero: jourDepart + i,
-        statut: 'collecte',
+        // Chantier "autonomie collecteur" (13 août 2026) : plus de confirmation
+        // PDG intermédiaire — l'encaissement du collecteur est directement confirmé.
+        statut: 'confirme',
         date: serverTimestamp(),
       });
     }
@@ -672,7 +681,8 @@ function ouvrirNouveauContrat(membreId, membreNom) {
         membre_id: membreId,
         montant: commission,
         jour_numero: 1,
-        statut: 'collecte',
+        // Chantier "autonomie collecteur" (13 août 2026) : confirmé directement.
+        statut: 'confirme',
         date: serverTimestamp(),
       });
 
@@ -820,7 +830,8 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
         membre_id: uid,
         montant: commission,
         jour_numero: 1,
-        statut: 'collecte',
+        // Chantier "autonomie collecteur" (13 août 2026) : confirmé directement.
+        statut: 'confirme',
         date: serverTimestamp(),
       });
 
