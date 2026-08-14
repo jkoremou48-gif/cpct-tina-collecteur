@@ -284,9 +284,6 @@ function lancerDashboard() {
     state.remboursements = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     renderAll();
   });
-  // Chantier "autonomie collecteur" (13 août 2026) : ne charge que les demandes
-  // de retrait/prêt des membres de CE collecteur (filtre sur collecteur_id,
-  // renseigné par l'app Membre lors de la création de la demande).
   const unsubRetraits = onSnapshot(
     query(
       collection(db, 'withdrawalRequests'),
@@ -491,8 +488,6 @@ function trouverContratsNonSoldes(membreId, contratExclureId) {
 }
 
 // --- Demandes de retrait / prêt des membres de ce collecteur ---
-// Chantier "autonomie collecteur" (13 août 2026) : logique reprise telle quelle
-// de l'ancien traitement PDG (création du prêt, clôture + reconduction, solde soldé).
 function infoTypeRetraitCollecteur(type) {
   const infos = {
     'pret': { libelle: 'Prêt (2%/semaine)', actionLabel: 'Valider comme prêt' },
@@ -647,8 +642,6 @@ function renderMembersList() {
   }
 
   contratsAffiches.forEach((contrat) => {
-    // Les paiements annulés par le PDG (statut "annule") ne comptent plus
-    // dans le nombre de jours payés du contrat (13 août 2026).
     const versements = state.payments.filter((p) => p.contract_id === contrat.id && p.statut !== 'annule');
     const joursPayes = versements.length;
     const estCloture = contrat.statut === 'cloture' || joursPayes >= 31;
@@ -1035,6 +1028,43 @@ function afficherIdentifiants(data) {
   carte.querySelector('#fermer-identifiants').addEventListener('click', () => overlay.remove());
 }
 
+// --- Correction du montant journalier (ex. erreur de saisie collecteur) ---
+// Chantier "correctif Solange LAMAH" (14 août 2026) : ne modifie QUE montant_mise,
+// jamais la commission. Bloqué dès qu'un versement au-delà du jour 1 existe.
+function ouvrirModificationMontantJournalier(contrat) {
+  ouvrirModal(`
+    <h2>Modifier le montant journalier — ${contrat.membre_nom}</h2>
+    <p class="subtitle-sm">Montant actuel : <b>${formatGNF(contrat.montant_mise || 0)}</b>/jour. Ceci ne modifie pas la commission déjà encaissée (${formatGNF(contrat.commission || 0)}).</p>
+    <form id="form-modifier-montant-jour">
+      <div class="field-row">
+        <label>Nouveau montant journalier (GNF)</label>
+        <input type="number" name="nouveauMontant" min="1" value="${contrat.montant_mise || ''}" required />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="modal-annuler-montant-jour" style="flex:1;">Annuler</button>
+        <button type="submit" style="flex:1;">Enregistrer</button>
+      </div>
+    </form>
+  `);
+  document.getElementById('modal-annuler-montant-jour').addEventListener('click', fermerModal);
+  document.getElementById('form-modifier-montant-jour').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const nouveauMontant = Number(new FormData(e.target).get('nouveauMontant'));
+    if (!nouveauMontant || nouveauMontant <= 0) {
+      notifier('Montant invalide.', 'erreur');
+      return;
+    }
+    try {
+      await updateDoc(doc(db, 'contracts', contrat.id), { montant_mise: nouveauMontant });
+      notifier('Montant journalier corrigé.', 'succes');
+      fermerModal();
+    } catch (err) {
+      console.error(err);
+      notifier('Erreur : ' + err.message, 'erreur');
+    }
+  });
+}
+
 async function afficherDetailsMembre(contrat) {
   const versements = state.payments.filter((p) => p.contract_id === contrat.id && p.statut !== 'annule');
   const versementsConfirmes = versements.filter((p) => p.statut === 'confirme');
@@ -1062,6 +1092,10 @@ async function afficherDetailsMembre(contrat) {
 
   const pret = (state.prets || []).find((p) => p.contract_id === contrat.id && p.statut === 'actif');
 
+  // La correction du montant journalier n'est proposée que si aucun versement
+  // au-delà du jour 1 n'a encore été enregistré (pour ne fausser aucun calcul déjà en cours).
+  const peutModifierMontant = versements.length <= 1;
+
   ouvrirModal(`
     <h2>${contrat.membre_nom}</h2>
     <p class="subtitle-sm">Téléphone : ${telephone} · Résidence : ${residence}</p>
@@ -1072,11 +1106,22 @@ async function afficherDetailsMembre(contrat) {
     <div class="soldes-row"><span>Montant du versement quotidien : <b>${formatGNF(contrat.montant_mise || 0)}</b></span></div>
     <div class="soldes-row"><span>Jours payés : <b>${versements.length}/31</b></span></div>
     ${totalNonSolde > 0 ? `<div class="soldes-row"><span style="color:#c0392b;">Contrat(s) non soldé(s)</span><span style="color:#c0392b;"><b>${formatGNF(totalNonSolde)}</b></span></div>` : ""}
+    ${peutModifierMontant ? `
+      <div class="modal-actions" style="margin-top:14px;">
+        <button type="button" id="modal-modifier-montant-jour" class="secondary" style="flex:1;">Modifier le montant journalier</button>
+      </div>
+    ` : `
+      <p style="font-size:12px; color:#999; margin-top:14px;">Le montant journalier ne peut plus être modifié : des versements au-delà du jour 1 ont déjà été enregistrés.</p>
+    `}
     <div class="modal-actions">
       <button type="button" class="secondary" id="modal-fermer-details" style="flex:1;">Fermer</button>
     </div>
   `);
   document.getElementById('modal-fermer-details').addEventListener('click', fermerModal);
+  const btnModifierMontant = document.getElementById('modal-modifier-montant-jour');
+  if (btnModifierMontant) {
+    btnModifierMontant.addEventListener('click', () => ouvrirModificationMontantJournalier(contrat));
+  }
 }
 
 function ouvrirModal(html) {
