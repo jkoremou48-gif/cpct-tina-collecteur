@@ -284,9 +284,9 @@ function lancerDashboard() {
     state.remboursements = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     renderAll();
   });
-  // NOTE (13 août 2026) : filtre ajouté sur collecteur_id — avant, ce listener
-  // chargeait les demandes de retrait de TOUS les collecteurs, pas seulement
-  // celles des membres de ce collecteur.
+  // Chantier "autonomie collecteur" (13 août 2026) : ne charge que les demandes
+  // de retrait/prêt des membres de CE collecteur (filtre sur collecteur_id,
+  // renseigné par l'app Membre lors de la création de la demande).
   const unsubRetraits = onSnapshot(
     query(
       collection(db, 'withdrawalRequests'),
@@ -322,6 +322,7 @@ function lancerDashboard() {
 function renderAll() {
   renderCollecteurHeader();
   renderMembersList();
+  renderDemandesRetrait();
 }
 
 function renderCollecteurHeader() {
@@ -489,6 +490,140 @@ function trouverContratsNonSoldes(membreId, contratExclureId) {
   );
 }
 
+// --- Demandes de retrait / prêt des membres de ce collecteur ---
+// Chantier "autonomie collecteur" (13 août 2026) : logique reprise telle quelle
+// de l'ancien traitement PDG (création du prêt, clôture + reconduction, solde soldé).
+function infoTypeRetraitCollecteur(type) {
+  const infos = {
+    'pret': { libelle: 'Prêt (2%/semaine)', actionLabel: 'Valider comme prêt' },
+    'solde_contrat_termine': { libelle: 'Solde de contrat terminé', actionLabel: 'Confirmer' },
+    'retrait_final': { libelle: 'Retrait final (clôture)', actionLabel: 'Confirmer' },
+  };
+  return infos[type] || { libelle: "Retrait d'épargne", actionLabel: 'Confirmer' };
+}
+
+function renderDemandesRetrait() {
+  let bloc = document.getElementById('blocDemandesRetrait');
+  if (!bloc) {
+    bloc = document.createElement('div');
+    bloc.id = 'blocDemandesRetrait';
+    bloc.className = 'card';
+    bloc.innerHTML = `
+      <h2 style="font-size:15px; margin-bottom:8px;">Demandes de retrait de mes membres</h2>
+      <div id="demandesRetraitList"></div>
+    `;
+    const membersListEl = document.getElementById('membersList');
+    membersListEl.parentElement.insertBefore(bloc, membersListEl);
+
+    bloc.addEventListener('click', async (e) => {
+      const btnConfirmer = e.target.closest("button[data-action='confirmer-retrait']");
+      if (btnConfirmer) {
+        await traiterDemandeRetrait(btnConfirmer.dataset.id, 'confirmer');
+        return;
+      }
+      const btnAnnuler = e.target.closest("button[data-action='annuler-retrait']");
+      if (btnAnnuler) {
+        await traiterDemandeRetrait(btnAnnuler.dataset.id, 'annuler');
+      }
+    });
+  }
+
+  const container = document.getElementById('demandesRetraitList');
+  if (state.withdrawalRequests.length === 0) {
+    container.innerHTML = '<p style="color:#999; font-size:13px;">Aucune demande en attente.</p>';
+    return;
+  }
+
+  container.innerHTML = state.withdrawalRequests.map((r) => {
+    const info = infoTypeRetraitCollecteur(r.type);
+    return `
+      <div class="member-row" data-id="${r.id}">
+        <div>
+          <strong>${r.memberName || 'Membre'}</strong><br>
+          <small>${info.libelle} — ${formatGNF(r.montant)}</small>
+        </div>
+        <div style="text-align:right;">
+          <button style="margin-top:4px; width:auto; padding:6px 10px; font-size:13px; background:#198754;"
+            data-action="confirmer-retrait" data-id="${r.id}">${info.actionLabel}</button>
+          <button style="margin-top:4px; width:auto; padding:6px 10px; font-size:13px; background:#c0392b;"
+            data-action="annuler-retrait" data-id="${r.id}">Annuler</button>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+async function traiterDemandeRetrait(id, action) {
+  const retrait = state.withdrawalRequests.find((r) => r.id === id);
+  if (!retrait) return;
+
+  if (action === 'annuler') {
+    try {
+      await updateDoc(doc(db, 'withdrawalRequests', id), {
+        statut: 'annule',
+        date_annulation: serverTimestamp(),
+        annule_par: state.currentCollecteurData.uid,
+      });
+      notifier('Demande de retrait annulée.', 'succes');
+    } catch (err) {
+      console.error(err);
+      notifier('Erreur : ' + err.message, 'erreur');
+    }
+    return;
+  }
+
+  try {
+    if (retrait.type === 'pret') {
+      await addDoc(collection(db, 'prets'), {
+        membre_id: retrait.memberId,
+        collecteur_id: state.currentCollecteurData.uid,
+        contract_id: retrait.contractId || null,
+        montant_initial: retrait.montant,
+        taux_hebdo: 0.02,
+        statut: 'actif',
+        interet_deja_reconnu: 0,
+        date_debut: serverTimestamp(),
+      });
+      await updateDoc(doc(db, 'withdrawalRequests', id), {
+        statut: 'confirme',
+        date_confirmation: serverTimestamp(),
+      });
+      notifier('Prêt validé et enregistré.', 'succes');
+    } else if (retrait.type === 'retrait_final') {
+      await updateDoc(doc(db, 'withdrawalRequests', id), {
+        statut: 'confirme',
+        date_confirmation: serverTimestamp(),
+      });
+      if (retrait.contractId) {
+        await updateDoc(doc(db, 'contracts', retrait.contractId), {
+          statut: 'cloture',
+          epargne_soldee: true,
+        });
+      }
+      await addDoc(collection(db, 'propositions_reconduction'), {
+        membre_id: retrait.memberId,
+        contrat_precedent_id: retrait.contractId || null,
+        statut: 'en_attente',
+        date_creation: serverTimestamp(),
+      });
+      notifier('Retrait confirmé, contrat clôturé. Le membre peut choisir de reconduire.', 'succes');
+    } else {
+      await updateDoc(doc(db, 'withdrawalRequests', id), {
+        statut: 'confirme',
+        date_confirmation: serverTimestamp(),
+      });
+      const contratsNonSoldes = trouverContratsNonSoldes(retrait.memberId, null);
+      for (const contrat of contratsNonSoldes) {
+        await updateDoc(doc(db, 'contracts', contrat.id), { epargne_soldee: true });
+      }
+      notifier('Retrait traité.', 'succes');
+    }
+  } catch (err) {
+    console.error(err);
+    notifier('Erreur : ' + err.message, 'erreur');
+  }
+}
+
 function renderMembersList() {
   const container = document.getElementById('membersList');
   container.innerHTML = '';
@@ -512,7 +647,9 @@ function renderMembersList() {
   }
 
   contratsAffiches.forEach((contrat) => {
-    const versements = state.payments.filter((p) => p.contract_id === contrat.id);
+    // Les paiements annulés par le PDG (statut "annule") ne comptent plus
+    // dans le nombre de jours payés du contrat (13 août 2026).
+    const versements = state.payments.filter((p) => p.contract_id === contrat.id && p.statut !== 'annule');
     const joursPayes = versements.length;
     const estCloture = contrat.statut === 'cloture' || joursPayes >= 31;
 
@@ -581,7 +718,7 @@ function getStatutContrat(contrat, versements) {
 function ouvrirPaiement(contratId) {
   const contrat = state.contracts.find((c) => c.id === contratId);
   if (!contrat) return;
-  const versements = state.payments.filter((p) => p.contract_id === contratId);
+  const versements = state.payments.filter((p) => p.contract_id === contratId && p.statut !== 'annule');
   const prochainJour = versements.length + 1;
   const joursRestants = 31 - versements.length;
 
@@ -614,8 +751,6 @@ async function enregistrerVersement(contrat, montantSaisi, jourDepart, joursRest
         membre_id: contrat.membre_id,
         montant: montantJournalier,
         jour_numero: jourDepart + i,
-        // Chantier "autonomie collecteur" (13 août 2026) : plus de confirmation
-        // PDG intermédiaire — l'encaissement du collecteur est directement confirmé.
         statut: 'confirme',
         date: serverTimestamp(),
       });
@@ -681,7 +816,6 @@ function ouvrirNouveauContrat(membreId, membreNom) {
         membre_id: membreId,
         montant: commission,
         jour_numero: 1,
-        // Chantier "autonomie collecteur" (13 août 2026) : confirmé directement.
         statut: 'confirme',
         date: serverTimestamp(),
       });
@@ -830,7 +964,6 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
         membre_id: uid,
         montant: commission,
         jour_numero: 1,
-        // Chantier "autonomie collecteur" (13 août 2026) : confirmé directement.
         statut: 'confirme',
         date: serverTimestamp(),
       });
@@ -903,7 +1036,7 @@ function afficherIdentifiants(data) {
 }
 
 async function afficherDetailsMembre(contrat) {
-  const versements = state.payments.filter((p) => p.contract_id === contrat.id);
+  const versements = state.payments.filter((p) => p.contract_id === contrat.id && p.statut !== 'annule');
   const versementsConfirmes = versements.filter((p) => p.statut === 'confirme');
   const versementsNonConfirmes = versements.filter((p) => p.statut !== 'confirme');
   const totalConfirme = versementsConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
