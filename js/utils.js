@@ -12,10 +12,29 @@ export function formatGNF(montant) {
   return n.toLocaleString("fr-FR") + " GNF";
 }
 
+// Alias attendu par plusieurs fichiers app.js (Collecteur, Membre, PDG) :
+// même comportement que formatGNF, sous un autre nom.
+export function formatMontant(montant) {
+  return formatGNF(montant);
+}
+
 export function formatDate(dateVal) {
   if (!dateVal) return "—";
   const d = dateVal.toDate ? dateVal.toDate() : new Date(dateVal);
   return d.toLocaleDateString("fr-FR", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+// Date + heure, utilisée notamment pour l'historique des demandes de retrait.
+export function formatDateHeure(dateVal) {
+  if (!dateVal) return "—";
+  const d = dateVal.toDate ? dateVal.toDate() : new Date(dateVal);
+  return d.toLocaleDateString("fr-FR", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 export function moisDeDate(dateVal) {
@@ -58,6 +77,7 @@ export function calculerSoldes(payments, contracts) {
   }
   return { totalEpargnes, totalCommissions, totalMises, parMois };
 }
+
 export function calculerStatutContrat(contrat, versementsConfirmes) {
   if (!contrat || contrat.statut !== 'actif') return contrat ? contrat.statut : null;
 
@@ -78,6 +98,32 @@ export function calculerStatutContrat(contrat, versementsConfirmes) {
   if (!dateReference) return 'actif';
   const diffJours = Math.floor((new Date() - dateReference) / (1000 * 60 * 60 * 24));
   return diffJours >= 7 ? 'inactif' : 'actif';
+}
+
+// Retourne le HTML d'un badge coloré selon le statut (utilisé notamment
+// dans l'historique des demandes de retrait du Membre et du Collecteur).
+export function badgeStatut(statut) {
+  const config = {
+    en_attente: { label: 'En attente', couleur: '#f39c12' },
+    confirme: { label: 'Confirmé', couleur: '#27ae60' },
+    valide: { label: 'Validé', couleur: '#27ae60' },
+    refuse: { label: 'Refusé', couleur: '#c0392b' },
+    annule: { label: 'Annulé', couleur: '#c0392b' },
+    actif: { label: 'Actif', couleur: '#27ae60' },
+    inactif: { label: 'Inactif', couleur: '#c0392b' },
+    cloture: { label: 'Clôturé', couleur: '#7f8c8d' },
+  };
+  const info = config[statut] || { label: statut || '—', couleur: '#7f8c8d' };
+  return `<span style="display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; color:#fff; background:${info.couleur};">${info.label}</span>`;
+}
+
+// Affiche un message dans un élément du DOM identifié par son id.
+// Utilisée dans app.js pour les retours de formulaire (succès/erreur).
+export function afficherMessage(elementId, message, couleur = 'black') {
+  const el = document.getElementById(elementId);
+  if (!el) return;
+  el.textContent = message;
+  el.style.color = couleur;
 }
 
 export function notifier(message, type = "info") {
