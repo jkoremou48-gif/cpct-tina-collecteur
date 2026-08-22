@@ -9,11 +9,12 @@ import {
   creerCompteSecondaire, uploaderPhotoProfil, changerMotDePasse,
 } from "./firebase-config.js";
 
-import { genererCodeParrain, formatGNF, formatDate, notifier, calculerStatutContrat } from "./utils.js";
+import { genererCodeParrain, formatGNF, formatDate, formatDateHeure, notifier, calculerStatutContrat } from "./utils.js";
 
 const TAUX_COMMISSION = 0.30;
 const PART_INTERET_COLLECTEUR = 0.30;
 const PART_INTERET_PDG = 0.70;
+const TAUX_HEBDO_PRET = 0.02;
 const AVATAR_DEFAUT = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='56' height='56'><rect width='56' height='56' fill='%23ddd'/></svg>";
 
 const state = {
@@ -284,8 +285,13 @@ function lancerDashboard() {
     state.remboursements = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     renderAll();
   });
+  // --- Demandes de retrait des membres de CE collecteur, en attente de sa décision ---
   const unsubRetraits = onSnapshot(
-    query(collection(db, 'withdrawalRequests'), where('statut', '==', 'en_attente')),
+    query(
+      collection(db, 'withdrawalRequests'),
+      where('collecteur_id', '==', state.currentCollecteurData.uid),
+      where('statut', '==', 'en_attente')
+    ),
     (snap) => {
       state.withdrawalRequests = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       renderAll();
@@ -314,6 +320,7 @@ function lancerDashboard() {
 
 function renderAll() {
   renderCollecteurHeader();
+  renderRetraitsMembres();
   renderMembersList();
 }
 
@@ -443,6 +450,108 @@ function ouvrirDemandeRetraitCommission() {
       notifier('Erreur : ' + err.message, 'erreur');
     }
   });
+}
+
+// ==========================================================
+// --- Demandes de retrait envoyées par les membres de ce collecteur ---
+// Le collecteur confirme ou rejette. À la confirmation :
+//   - "solde_contrat_termine" : marque l'ancien contrat comme soldé
+//   - "retrait_final" : clôture le contrat actif et le marque comme soldé
+//   - "pret" : crée le prêt (2%/semaine) correspondant
+// ==========================================================
+
+function libelleTypeRetrait(type) {
+  const labels = {
+    pret: 'Prêt (2%/semaine)',
+    solde_contrat_termine: "Solde de contrat terminé",
+    retrait_final: 'Retrait final (clôture du contrat)',
+  };
+  return labels[type] || 'Retrait';
+}
+
+function renderRetraitsMembres() {
+  const container = document.getElementById('retraitsList');
+  if (!container) return;
+
+  if (state.withdrawalRequests.length === 0) {
+    container.innerHTML = '<p style="color:#999; font-size:13px;">Aucune demande en attente.</p>';
+    return;
+  }
+
+  container.innerHTML = '';
+  state.withdrawalRequests
+    .slice()
+    .sort((a, b) => (b.dateCreation?.toMillis?.() || 0) - (a.dateCreation?.toMillis?.() || 0))
+    .forEach((r) => {
+      const row = document.createElement('div');
+      row.className = 'retrait-row';
+      row.innerHTML = `
+        <div class="retrait-row-top">
+          <div>
+            <strong>${r.memberName || 'Membre'}</strong><br>
+            <small>${libelleTypeRetrait(r.type)}</small><br>
+            <small style="color:#999;">${formatDateHeure(r.dateCreation)}</small>
+          </div>
+          <span class="badge attente">${formatGNF(r.montant)}</span>
+        </div>
+        <div class="retrait-actions">
+          <button type="button" class="secondary" data-action="rejeter" data-id="${r.id}">Rejeter</button>
+          <button type="button" data-action="confirmer" data-id="${r.id}">Confirmer</button>
+        </div>
+      `;
+      row.querySelector('[data-action="confirmer"]').addEventListener('click', () => confirmerRetraitMembre(r));
+      row.querySelector('[data-action="rejeter"]').addEventListener('click', () => rejeterRetraitMembre(r));
+      container.appendChild(row);
+    });
+}
+
+async function confirmerRetraitMembre(demande) {
+  try {
+    if (demande.type === 'solde_contrat_termine' && demande.contractId) {
+      await updateDoc(doc(db, 'contracts', demande.contractId), { epargne_soldee: true });
+    } else if (demande.type === 'retrait_final' && demande.contractId) {
+      await updateDoc(doc(db, 'contracts', demande.contractId), {
+        statut: 'cloture',
+        epargne_soldee: true,
+      });
+    } else if (demande.type === 'pret') {
+      await addDoc(collection(db, 'prets'), {
+        contract_id: demande.contractId || null,
+        membre_id: demande.memberId,
+        collecteur_id: state.currentCollecteurData.uid,
+        montant_initial: demande.montant,
+        taux_hebdo: TAUX_HEBDO_PRET,
+        interet_deja_reconnu: 0,
+        statut: 'actif',
+        date_debut: serverTimestamp(),
+      });
+    }
+
+    await updateDoc(doc(db, 'withdrawalRequests', demande.id), {
+      statut: 'confirme',
+      date_confirmation: serverTimestamp(),
+      confirme_par: state.currentCollecteurData.uid,
+    });
+
+    notifier('Demande confirmée.', 'succes');
+  } catch (err) {
+    console.error(err);
+    notifier('Erreur : ' + err.message, 'erreur');
+  }
+}
+
+async function rejeterRetraitMembre(demande) {
+  try {
+    await updateDoc(doc(db, 'withdrawalRequests', demande.id), {
+      statut: 'refuse',
+      date_refus: serverTimestamp(),
+      refuse_par: state.currentCollecteurData.uid,
+    });
+    notifier('Demande rejetée.', 'succes');
+  } catch (err) {
+    console.error(err);
+    notifier('Erreur : ' + err.message, 'erreur');
+  }
 }
 
 function calculerEpargneNetteContrat(contrat) {
