@@ -37,6 +37,10 @@
   .avatar-collecteur { width: 56px; height: 56px; border-radius: 50%; object-fit: cover; background: #ddd; display: block; margin: 0 auto 10px auto; cursor: pointer; }
   .avatar-label { display: block; text-align: center; font-size: 12px; color: #0d6efd; cursor: pointer; margin-top: -6px; margin-bottom: 10px; }
   .field-label { display:block; font-size:12px; color:#666; margin-top:10px; margin-bottom:-4px; }
+  .retrait-row { padding: 10px 0; border-bottom: 1px solid #eee; }
+  .retrait-row-top { display: flex; justify-content: space-between; align-items: center; }
+  .retrait-actions { display: flex; gap: 8px; margin-top: 8px; }
+  .retrait-actions button { width: auto; flex: 1; padding: 8px; font-size: 13px; }
 </style>
 </head>
 <body>
@@ -135,6 +139,12 @@
       <div class="soldes-row">
         <span>Commission en attente : <b class="collecte" id="commissionAttente">0 GNF</b></span>
       </div>
+    </div>
+
+    <div class="card">
+      <h3>Demandes de retrait de mes membres</h3>
+      <p style="color:#666; font-size:13px; margin-top:4px;">Confirmez ou rejetez les demandes envoyées par vos membres (retrait, prêt, solde d'ancien contrat).</p>
+      <div id="retraitsList" style="margin-top:10px;"></div>
     </div>
 
     <div class="card">
