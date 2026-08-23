@@ -28,6 +28,8 @@ const state = {
   remboursements: [],
   interetsPartages: [],
   retraitsCommission: [],
+  diffusionsCollecteur: [],
+  mesMessagesPdg: [],
   unsubscribers: [],
 };
 let creationEnCours = false;
@@ -315,12 +317,28 @@ function lancerDashboard() {
       renderAll();
     }
   );
-  state.unsubscribers.push(unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements, unsubRetraits, unsubInterets, unsubRetraitsCommission);
+  // --- Communication : diffusions du PDG destinées aux collecteurs + ma conversation privée avec le PDG ---
+  const unsubDiffusions = onSnapshot(
+    query(collection(db, 'diffusions'), where('groupe_cible', '==', 'collecteurs')),
+    (snap) => {
+      state.diffusionsCollecteur = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
+  const unsubMesMessages = onSnapshot(
+    query(collection(db, 'messages_prives'), where('participant_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.mesMessagesPdg = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
+  state.unsubscribers.push(unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements, unsubRetraits, unsubInterets, unsubRetraitsCommission, unsubDiffusions, unsubMesMessages);
 }
 
 function renderAll() {
   renderCollecteurHeader();
   renderRetraitsMembres();
+  renderCommunicationCollecteur();
   renderMembersList();
 }
 
@@ -553,6 +571,102 @@ async function rejeterRetraitMembre(demande) {
     notifier('Erreur : ' + err.message, 'erreur');
   }
 }
+
+// ==========================================================
+// --- Communication : diffusions du PDG (collecteurs) + conversation privée ---
+// ==========================================================
+
+function renderCommunicationCollecteur() {
+  renderDiffusionsCollecteur();
+  renderFilPdg();
+}
+
+function renderDiffusionsCollecteur() {
+  const container = document.getElementById('diffusionsCollecteurList');
+  if (!container) return;
+
+  const diffusionsTriees = [...state.diffusionsCollecteur].sort(
+    (a, b) => (b.date?.toMillis?.() || 0) - (a.date?.toMillis?.() || 0)
+  );
+
+  if (diffusionsTriees.length === 0) {
+    container.innerHTML = '<p style="color:#999; font-size:13px;">Aucun message du PDG pour le moment.</p>';
+    return;
+  }
+
+  container.innerHTML = diffusionsTriees.slice(0, 10).map((d) => `
+    <div style="background:#f4f6f8; border-radius:8px; padding:10px; margin-bottom:8px;">
+      <p style="font-size:13px;">${d.contenu}</p>
+      <p style="font-size:11px; color:#999; margin-top:4px;">${formatDateHeure(d.date)}</p>
+    </div>
+  `).join('');
+}
+
+function renderFilPdg() {
+  const container = document.getElementById('filPdgMessages');
+  const badge = document.getElementById('badgeMessagesNonLus');
+  if (!container) return;
+
+  const messages = [...state.mesMessagesPdg].sort(
+    (a, b) => (a.date?.toMillis?.() || 0) - (b.date?.toMillis?.() || 0)
+  );
+
+  if (messages.length === 0) {
+    container.innerHTML = '<p style="color:#999; font-size:13px;">Aucun échange pour le moment. Écrivez au PDG ci-dessous.</p>';
+  } else {
+    container.innerHTML = messages.map((m) => `
+      <div style="align-self:${m.expediteur_role === 'collecteur' ? 'flex-end' : 'flex-start'}; background:${m.expediteur_role === 'collecteur' ? '#0d6efd' : '#f0f0f0'}; color:${m.expediteur_role === 'collecteur' ? 'white' : '#222'}; border-radius:10px; padding:8px 12px; max-width:80%;">
+        <p style="font-size:14px;">${m.contenu}</p>
+        <p style="font-size:11px; opacity:0.7; margin-top:4px;">${formatDateHeure(m.date)}</p>
+      </div>
+    `).join('');
+    container.scrollTop = container.scrollHeight;
+  }
+
+  const nonLus = messages.filter((m) => m.expediteur_role === 'pdg' && m.lu_participant === false);
+  if (badge) {
+    if (nonLus.length > 0) {
+      badge.textContent = nonLus.length;
+      badge.classList.remove('hidden');
+    } else {
+      badge.classList.add('hidden');
+    }
+  }
+
+  // Marque comme lus les messages du PDG affichés
+  nonLus.forEach(async (m) => {
+    try {
+      await updateDoc(doc(db, 'messages_prives', m.id), { lu_participant: true });
+    } catch (err) {
+      console.error(err);
+    }
+  });
+}
+
+document.getElementById('form-message-pdg').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const contenu = fd.get('contenu').trim();
+  if (!contenu) return;
+
+  try {
+    await addDoc(collection(db, 'messages_prives'), {
+      participant_id: state.currentCollecteurData.uid,
+      participant_nom: state.currentCollecteurData.nom,
+      participant_role: 'collecteur',
+      expediteur_id: state.currentCollecteurData.uid,
+      expediteur_role: 'collecteur',
+      contenu,
+      date: serverTimestamp(),
+      lu_pdg: false,
+      lu_participant: true,
+    });
+    e.target.reset();
+  } catch (err) {
+    console.error(err);
+    notifier('Erreur : ' + err.message, 'erreur');
+  }
+});
 
 function calculerEpargneNetteContrat(contrat) {
   const versements = state.payments.filter((p) => p.contract_id === contrat.id);
