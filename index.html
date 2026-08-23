@@ -12,7 +12,7 @@
   header { background: #0d6efd; color: white; padding: 16px; text-align: center; font-size: 18px; font-weight: bold; }
   .container { padding: 16px; max-width: 500px; margin: 0 auto; }
   .card { background: white; border-radius: 10px; padding: 16px; margin-bottom: 12px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); }
-  input, select, button { width: 100%; padding: 12px; margin-top: 8px; border-radius: 8px; border: 1px solid #ccc; font-size: 15px; }
+  input, select, button, textarea { width: 100%; padding: 12px; margin-top: 8px; border-radius: 8px; border: 1px solid #ccc; font-size: 15px; font-family: inherit; }
   button { background: #0d6efd; color: white; border: none; font-weight: bold; cursor: pointer; }
   button:disabled { background: #999; }
   button.secondary { background: #6c757d; }
@@ -145,6 +145,22 @@
       <h3>Demandes de retrait de mes membres</h3>
       <p style="color:#666; font-size:13px; margin-top:4px;">Confirmez ou rejetez les demandes envoyées par vos membres (retrait, prêt, solde d'ancien contrat).</p>
       <div id="retraitsList" style="margin-top:10px;"></div>
+    </div>
+
+    <div class="card">
+      <div style="display:flex; justify-content:space-between; align-items:center;">
+        <h3>Communication</h3>
+        <span id="badgeMessagesNonLus" class="badge attente hidden" style="width:auto;">0</span>
+      </div>
+      <p style="color:#666; font-size:13px; margin-top:4px;">Messages diffusés par le PDG à tous les collecteurs :</p>
+      <div id="diffusionsCollecteurList" style="margin-top:8px;"></div>
+      <hr style="margin:14px 0; border:none; border-top:1px solid #eee;">
+      <p style="font-weight:bold; margin-bottom:6px;">Ma conversation avec le PDG</p>
+      <div id="filPdgMessages" style="max-height:240px; overflow-y:auto; display:flex; flex-direction:column; gap:8px; margin-bottom:6px;"></div>
+      <form id="form-message-pdg">
+        <textarea name="contenu" rows="2" placeholder="Écrire au PDG (question, difficulté sur le terrain, suggestion...)" required></textarea>
+        <button type="submit" style="margin-top:8px;">Envoyer</button>
+      </form>
     </div>
 
     <div class="card">
