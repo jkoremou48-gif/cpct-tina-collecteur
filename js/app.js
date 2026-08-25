@@ -170,7 +170,6 @@ document.getElementById('logoutBtn').addEventListener('click', async () => {
   showOnly(loginScreen);
 });
 
-// --- Photo de profil ---
 document.getElementById('collecteur-avatar-input').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   if (!file || !state.currentCollecteurData) return;
@@ -186,7 +185,6 @@ document.getElementById('collecteur-avatar-input').addEventListener('change', as
   }
 });
 
-// --- Changement de mot de passe ---
 function ajouterBoutonChangerMotDePasse() {
   if (document.getElementById('btn-changer-mdp')) return;
   const btnLogout = document.getElementById('logoutBtn');
@@ -287,7 +285,6 @@ function lancerDashboard() {
     state.remboursements = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     renderAll();
   });
-  // --- Demandes de retrait des membres de CE collecteur, en attente de sa décision ---
   const unsubRetraits = onSnapshot(
     query(
       collection(db, 'withdrawalRequests'),
@@ -317,7 +314,6 @@ function lancerDashboard() {
       renderAll();
     }
   );
-  // --- Communication : diffusions du PDG destinées aux collecteurs + ma conversation privée avec le PDG ---
   const unsubDiffusions = onSnapshot(
     query(collection(db, 'diffusions'), where('groupe_cible', '==', 'collecteurs')),
     (snap) => {
@@ -342,21 +338,22 @@ function renderAll() {
   renderMembersList();
 }
 
+// --- Correctif (23 août 2026) : le solde du membre compte tout versement
+// NON ANNULÉ, immédiatement, sans attendre le verrouillage/confirmation du PDG.
 function renderCollecteurHeader() {
   document.getElementById('collectorName').textContent = state.currentCollecteurData.nom || 'Collecteur';
 
   const TC = state.payments.reduce((s, p) => s + Number(p.montant || 0), 0);
   const TV = state.versements.reduce((s, v) => s + Number(v.montant || 0), 0);
-
   const resteAVerser = TC - TV;
 
+  const versementsNonAnnules = state.payments.filter((p) => p.statut !== 'annule');
   const versementsConfirmes = state.payments.filter((p) => p.statut === 'confirme');
-  const versementsNonConfirmes = state.payments.filter((p) => p.statut !== 'confirme');
-  const versementConfirmeTotal = versementsConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
-  const versementNonConfirmeTotal = versementsNonConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const versementConfirmeTotal = versementsNonAnnules.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const versementNonConfirmeTotal = state.payments.filter((p) => p.statut === 'collecte').reduce((s, p) => s + Number(p.montant || 0), 0);
 
   const contratsConfirmes = state.contracts.filter((c) =>
-    state.payments.some((p) => p.contract_id === c.id && p.jour_numero === 1 && p.statut === 'confirme')
+    state.payments.some((p) => p.contract_id === c.id && p.jour_numero === 1 && p.statut !== 'annule')
   ).length;
 
   const commissionsConfirmees = versementsConfirmes.filter((p) => p.jour_numero === 1);
@@ -365,9 +362,9 @@ function renderCollecteurHeader() {
   const commissionInterets = state.interetsPartages.reduce((s, i) => s + Number(i.montant_collecteur || 0), 0);
   const CC = commissionInscriptions + commissionInterets;
 
-  const soldeTotalEpargnes = versementConfirmeTotal - totalCommissionConfirmee;
+  const soldeTotalEpargnes = versementsNonAnnules.filter((p) => p.jour_numero > 1).reduce((s, p) => s + Number(p.montant || 0), 0);
 
-  const commissionsNonConfirmees = versementsNonConfirmes.filter((p) => p.jour_numero === 1);
+  const commissionsNonConfirmees = state.payments.filter((p) => p.statut === 'collecte' && p.jour_numero === 1);
   const totalCommissionNonConfirmee = commissionsNonConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
   const commissionEnAttente = totalCommissionNonConfirmee * TAUX_COMMISSION;
 
@@ -389,10 +386,10 @@ function renderCollecteurHeader() {
       <div class="soldes-row"><span>Solde total des épargnes : <b id="soldeTotalEpargnes">0 GNF</b></span></div>
       <hr style="margin:10px 0; border:none; border-top:1px solid #eee;">
       <div class="soldes-row"><span>Contrats confirmés : <b id="nbContratsConfirmes">0</b></span></div>
-      <div class="soldes-row"><span>Versement total confirmé : <b id="versementConfirme">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Versement non confirmé : <b id="versementNonConfirme">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Versement total comptabilisé : <b id="versementConfirme">0 GNF</b></span></div>
+      <div class="soldes-row"><span>En attente de verrouillage (24h) : <b id="versementNonConfirme">0 GNF</b></span></div>
       <div class="soldes-row"><span>Total collecté (TC) : <b id="soldeTC">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Commission inscriptions (30%) : <b id="soldeCommissionInscriptions">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission inscriptions (30%, verrouillée) : <b id="soldeCommissionInscriptions">0 GNF</b></span></div>
       <div class="soldes-row"><span>Commission intérêts prêts (30%) : <b id="soldeCommissionInterets">0 GNF</b></span></div>
       <div class="soldes-row"><span>Commission réalisée (total) : <b id="soldeCC">0 GNF</b></span></div>
       <hr style="margin:10px 0; border:none; border-top:1px solid #eee;">
@@ -469,14 +466,6 @@ function ouvrirDemandeRetraitCommission() {
     }
   });
 }
-
-// ==========================================================
-// --- Demandes de retrait envoyées par les membres de ce collecteur ---
-// Le collecteur confirme ou rejette. À la confirmation :
-//   - "solde_contrat_termine" : marque l'ancien contrat comme soldé
-//   - "retrait_final" : clôture le contrat actif et le marque comme soldé
-//   - "pret" : crée le prêt (2%/semaine) correspondant
-// ==========================================================
 
 function libelleTypeRetrait(type) {
   const labels = {
@@ -572,10 +561,6 @@ async function rejeterRetraitMembre(demande) {
   }
 }
 
-// ==========================================================
-// --- Communication : diffusions du PDG (collecteurs) + conversation privée ---
-// ==========================================================
-
 function renderCommunicationCollecteur() {
   renderDiffusionsCollecteur();
   renderFilPdg();
@@ -633,7 +618,6 @@ function renderFilPdg() {
     }
   }
 
-  // Marque comme lus les messages du PDG affichés
   nonLus.forEach(async (m) => {
     try {
       await updateDoc(doc(db, 'messages_prives', m.id), { lu_participant: true });
@@ -668,10 +652,12 @@ document.getElementById('form-message-pdg').addEventListener('submit', async (e)
   }
 });
 
+// --- Correctif (23 août 2026) : compte tout versement NON ANNULÉ,
+// immédiatement, sans attendre le verrouillage/confirmation du PDG (24h).
 function calculerEpargneNetteContrat(contrat) {
   const versements = state.payments.filter((p) => p.contract_id === contrat.id);
   return versements
-    .filter((p) => p.statut === 'confirme' && p.jour_numero > 1)
+    .filter((p) => p.statut !== 'annule' && p.jour_numero > 1)
     .reduce((s, p) => s + Number(p.montant || 0), 0);
 }
 
@@ -709,7 +695,7 @@ function renderMembersList() {
   const container = document.getElementById('membersList');
   container.innerHTML = '';
 
-  const versementsConfirmesTous = state.payments.filter((p) => p.statut === 'confirme');
+  const versementsConfirmesTous = state.payments.filter((p) => p.statut !== 'annule');
 
   const contratsParMembre = {};
   state.contracts
@@ -729,7 +715,7 @@ function renderMembersList() {
 
   contratsAffiches.forEach((contrat) => {
     const versements = state.payments.filter((p) => p.contract_id === contrat.id);
-    const joursPayes = versements.length;
+    const joursPayes = versements.filter((v) => v.statut !== 'annule').length;
     const estCloture = contrat.statut === 'cloture' || joursPayes >= 31;
 
     let statut = getStatutContrat(contrat, versements);
@@ -781,10 +767,11 @@ function renderMembersList() {
 }
 
 function getStatutContrat(contrat, versements) {
-  if (versements.length >= 31) return { texte: 'Terminé', classe: 'ok' };
-  if (versements.length === 0) return { texte: 'À démarrer', classe: 'due' };
+  const versementsNonAnnules = versements.filter((v) => v.statut !== 'annule');
+  if (versementsNonAnnules.length >= 31) return { texte: 'Terminé', classe: 'ok' };
+  if (versementsNonAnnules.length === 0) return { texte: 'À démarrer', classe: 'due' };
 
-  const dernier = versements.reduce((a, b) => (a.jour_numero > b.jour_numero ? a : b));
+  const dernier = versementsNonAnnules.reduce((a, b) => (a.jour_numero > b.jour_numero ? a : b));
   const dateVersement = dernier.date && dernier.date.toDate ? dernier.date.toDate() : null;
   if (!dateVersement) return { texte: 'À jour', classe: 'due' };
 
@@ -797,7 +784,7 @@ function getStatutContrat(contrat, versements) {
 function ouvrirPaiement(contratId) {
   const contrat = state.contracts.find((c) => c.id === contratId);
   if (!contrat) return;
-  const versements = state.payments.filter((p) => p.contract_id === contratId);
+  const versements = state.payments.filter((p) => p.contract_id === contratId && p.statut !== 'annule');
   const prochainJour = versements.length + 1;
   const joursRestants = 31 - versements.length;
 
@@ -1114,13 +1101,14 @@ function afficherIdentifiants(data) {
   carte.querySelector('#fermer-identifiants').addEventListener('click', () => overlay.remove());
 }
 
+// --- Correctif (23 août 2026) : versement comptabilisé = tout ce qui n'est pas annulé.
 async function afficherDetailsMembre(contrat) {
   const versements = state.payments.filter((p) => p.contract_id === contrat.id);
-  const versementsConfirmes = versements.filter((p) => p.statut === 'confirme');
-  const versementsNonConfirmes = versements.filter((p) => p.statut !== 'confirme');
-  const totalConfirme = versementsConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
-  const totalNonConfirme = versementsNonConfirmes.reduce((s, p) => s + Number(p.montant || 0), 0);
-  const commissionConfirmee = versementsConfirmes
+  const versementsComptes = versements.filter((p) => p.statut !== 'annule');
+  const versementsEnAttenteVerrou = versements.filter((p) => p.statut === 'collecte');
+  const totalConfirme = versementsComptes.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const totalNonConfirme = versementsEnAttenteVerrou.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const commissionConfirmee = versementsComptes
     .filter((p) => p.jour_numero === 1)
     .reduce((s, p) => s + Number(p.montant || 0), 0);
   const epargneNette = totalConfirme - commissionConfirmee;
@@ -1146,10 +1134,10 @@ async function afficherDetailsMembre(contrat) {
     <p class="subtitle-sm">Téléphone : ${telephone} · Résidence : ${residence}</p>
     <div class="soldes-row"><span>Épargne nette : <b>${formatGNF(epargneNette > 0 ? epargneNette : 0)}</b></span></div>
     ${pret ? `<div class="soldes-row"><span style="color:#c0392b;">Solde disponible (après prêt)</span><span style="color:#c0392b;"><b>${formatGNF(soldeDisponible)}</b></span></div>` : ''}
-    <div class="soldes-row"><span>Versement confirmé : <b>${formatGNF(totalConfirme)}</b></span></div>
-    <div class="soldes-row"><span>Versement non confirmé : <b>${formatGNF(totalNonConfirme)}</b></span></div>
+    <div class="soldes-row"><span>Versement comptabilisé : <b>${formatGNF(totalConfirme)}</b></span></div>
+    <div class="soldes-row"><span>En attente de verrouillage (24h) : <b>${formatGNF(totalNonConfirme)}</b></span></div>
     <div class="soldes-row"><span>Montant du versement quotidien : <b>${formatGNF(contrat.montant_mise || 0)}</b></span></div>
-    <div class="soldes-row"><span>Jours payés : <b>${versements.length}/31</b></span></div>
+    <div class="soldes-row"><span>Jours payés : <b>${versementsComptes.length}/31</b></span></div>
     ${totalNonSolde > 0 ? `<div class="soldes-row"><span style="color:#c0392b;">Contrat(s) non soldé(s)</span><span style="color:#c0392b;"><b>${formatGNF(totalNonSolde)}</b></span></div>` : ""}
     <div class="modal-actions">
       <button type="button" class="secondary" id="modal-fermer-details" style="flex:1;">Fermer</button>
