@@ -9,12 +9,16 @@ import {
   creerCompteSecondaire, uploaderPhotoProfil, changerMotDePasse,
 } from "./firebase-config.js";
 
-import { genererCodeParrain, formatGNF, formatDate, formatDateHeure, notifier, calculerStatutContrat } from "./utils.js";
+import {
+  genererCodeParrain, formatGNF, formatDate, formatDateHeure, notifier,
+  calculerStatutContrat, TYPES_CONTRAT, infoTypeContrat, calculerMontantDuPretGeneralise,
+} from "./utils.js";
 
-const TAUX_COMMISSION = 0.30;
-const PART_INTERET_COLLECTEUR = 0.30;
-const PART_INTERET_PDG = 0.70;
-const TAUX_HEBDO_PRET = 0.02;
+const TAUX_COMMISSION = 0.30; // journalier uniquement (jour 1)
+const PART_INTERET_COLLECTEUR = 0.30; // journalier uniquement
+const PART_INTERET_PDG = 0.70; // journalier uniquement
+const TAUX_HEBDO_PRET = 0.02; // journalier uniquement
+const TAUX_MENSUEL_PRET_DEFAUT = 0.08; // hebdo/mensuel, si le PDG n'a rien réglé
 const AVATAR_DEFAUT = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='56' height='56'><rect width='56' height='56' fill='%23ddd'/></svg>";
 
 const state = {
@@ -30,6 +34,10 @@ const state = {
   retraitsCommission: [],
   diffusionsCollecteur: [],
   mesMessagesPdg: [],
+  fraisInscriptions: [],
+  depenses: [],
+  redistributions: [],
+  parametresInterets: { pdg: 0.70, collecteur: 0.30, redistribution: 0 },
   unsubscribers: [],
 };
 let creationEnCours = false;
@@ -328,7 +336,45 @@ function lancerDashboard() {
       renderAll();
     }
   );
-  state.unsubscribers.push(unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements, unsubRetraits, unsubInterets, unsubRetraitsCommission, unsubDiffusions, unsubMesMessages);
+  // --- NOUVEAU (25 août 2026) : types de contrats ---
+  const unsubFraisInscription = onSnapshot(
+    query(collection(db, 'frais_inscription'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.fraisInscriptions = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
+  const unsubDepenses = onSnapshot(
+    query(collection(db, 'depenses'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.depenses = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
+  const unsubRedistributions = onSnapshot(
+    query(collection(db, 'redistributions_interets'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.redistributions = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
+  const unsubParametres = onSnapshot(doc(db, 'parametres', 'interets_types_annuels'), (snap) => {
+    if (snap.exists()) {
+      const d = snap.data();
+      state.parametresInterets = {
+        pdg: Number(d.pdg ?? 0.70),
+        collecteur: Number(d.collecteur ?? 0.30),
+        redistribution: Number(d.redistribution ?? 0),
+      };
+    }
+    renderAll();
+  });
+
+  state.unsubscribers.push(
+    unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements,
+    unsubRetraits, unsubInterets, unsubRetraitsCommission, unsubDiffusions, unsubMesMessages,
+    unsubFraisInscription, unsubDepenses, unsubRedistributions, unsubParametres
+  );
 }
 
 function renderAll() {
@@ -345,24 +391,30 @@ function renderCollecteurHeader() {
 
   const TC = state.payments.reduce((s, p) => s + Number(p.montant || 0), 0);
   const TV = state.versements.reduce((s, v) => s + Number(v.montant || 0), 0);
-  const resteAVerser = TC - TV;
 
   const versementsNonAnnules = state.payments.filter((p) => p.statut !== 'annule');
   const versementsConfirmes = state.payments.filter((p) => p.statut === 'confirme');
   const versementConfirmeTotal = versementsNonAnnules.reduce((s, p) => s + Number(p.montant || 0), 0);
   const versementNonConfirmeTotal = state.payments.filter((p) => p.statut === 'collecte').reduce((s, p) => s + Number(p.montant || 0), 0);
 
-  const contratsConfirmes = state.contracts.filter((c) =>
+  const contratsJournaliers = state.contracts.filter((c) => (c.type_contrat || 'journalier') === 'journalier');
+  const contratsConfirmes = contratsJournaliers.filter((c) =>
     state.payments.some((p) => p.contract_id === c.id && p.jour_numero === 1 && p.statut !== 'annule')
   ).length;
 
   const commissionsConfirmees = versementsConfirmes.filter((p) => p.jour_numero === 1);
   const totalCommissionConfirmee = commissionsConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
   const commissionInscriptions = totalCommissionConfirmee * TAUX_COMMISSION;
-  const commissionInterets = state.interetsPartages.reduce((s, i) => s + Number(i.montant_collecteur || 0), 0);
-  const CC = commissionInscriptions + commissionInterets;
 
-  const soldeTotalEpargnes = versementsNonAnnules.filter((p) => p.jour_numero > 1).reduce((s, p) => s + Number(p.montant || 0), 0);
+  // Frais d'inscription hebdo/mensuel (part collecteur), déjà calculée à la création
+  const fraisInscriptionCollecteur = state.fraisInscriptions.reduce((s, f) => s + Number(f.montant_collecteur || 0), 0);
+
+  const commissionInterets = state.interetsPartages.reduce((s, i) => s + Number(i.montant_collecteur || 0), 0);
+  const CC = commissionInscriptions + fraisInscriptionCollecteur + commissionInterets;
+
+  const soldeTotalEpargnes = state.contracts
+    .filter((c) => c.statut === 'actif')
+    .reduce((s, c) => s + Math.max(0, calculerEpargneNetteContrat(c)), 0);
 
   const commissionsNonConfirmees = state.payments.filter((p) => p.statut === 'collecte' && p.jour_numero === 1);
   const totalCommissionNonConfirmee = commissionsNonConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
@@ -374,7 +426,7 @@ function renderCollecteurHeader() {
   const totalRetraitCommissionEnAttente = retraitsCommissionEnAttente.reduce((s, r) => s + Number(r.montant || 0), 0);
   const commissionDisponibleRetrait = Math.max(0, CC - totalRetraitCommissionConfirme - totalRetraitCommissionEnAttente);
 
-  document.getElementById('collectorStats').textContent = `${state.contracts.length} contrat(s) actif(s)`;
+  document.getElementById('collectorStats').textContent = `${state.contracts.length} contrat(s)`;
   document.getElementById('commissionConfirmee').textContent = formatGNF(CC);
   document.getElementById('commissionAttente').textContent = formatGNF(commissionEnAttente);
 
@@ -383,14 +435,15 @@ function renderCollecteurHeader() {
     situationBloc = document.createElement('div');
     situationBloc.id = 'situationGenerale';
     situationBloc.innerHTML = `
-      <div class="soldes-row"><span>Solde total des épargnes : <b id="soldeTotalEpargnes">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Solde total des épargnes (tous types) : <b id="soldeTotalEpargnes">0 GNF</b></span></div>
       <hr style="margin:10px 0; border:none; border-top:1px solid #eee;">
-      <div class="soldes-row"><span>Contrats confirmés : <b id="nbContratsConfirmes">0</b></span></div>
+      <div class="soldes-row"><span>Contrats journaliers confirmés : <b id="nbContratsConfirmes">0</b></span></div>
       <div class="soldes-row"><span>Versement total comptabilisé : <b id="versementConfirme">0 GNF</b></span></div>
       <div class="soldes-row"><span>En attente de verrouillage (24h) : <b id="versementNonConfirme">0 GNF</b></span></div>
       <div class="soldes-row"><span>Total collecté (TC) : <b id="soldeTC">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Commission inscriptions (30%, verrouillée) : <b id="soldeCommissionInscriptions">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Commission intérêts prêts (30%) : <b id="soldeCommissionInterets">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission inscriptions journalier (30%, verrouillée) : <b id="soldeCommissionInscriptions">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Frais d'inscription hebdo/mensuel (ma part) : <b id="soldeFraisInscription">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission intérêts prêts : <b id="soldeCommissionInterets">0 GNF</b></span></div>
       <div class="soldes-row"><span>Commission réalisée (total) : <b id="soldeCC">0 GNF</b></span></div>
       <hr style="margin:10px 0; border:none; border-top:1px solid #eee;">
       <div class="soldes-row"><span>Déjà retiré : <b id="soldeRetraitCommissionConfirme">0 GNF</b></span></div>
@@ -408,6 +461,7 @@ function renderCollecteurHeader() {
   document.getElementById('versementNonConfirme').textContent = formatGNF(versementNonConfirmeTotal);
   document.getElementById('soldeTC').textContent = formatGNF(TC);
   document.getElementById('soldeCommissionInscriptions').textContent = formatGNF(commissionInscriptions);
+  document.getElementById('soldeFraisInscription').textContent = formatGNF(fraisInscriptionCollecteur);
   document.getElementById('soldeCommissionInterets').textContent = formatGNF(commissionInterets);
   document.getElementById('soldeCC').textContent = formatGNF(CC);
   document.getElementById('soldeRetraitCommissionConfirme').textContent = formatGNF(totalRetraitCommissionConfirme);
@@ -469,7 +523,7 @@ function ouvrirDemandeRetraitCommission() {
 
 function libelleTypeRetrait(type) {
   const labels = {
-    pret: 'Prêt (2%/semaine)',
+    pret: 'Prêt',
     solde_contrat_termine: "Solde de contrat terminé",
     retrait_final: 'Retrait final (clôture du contrat)',
   };
@@ -522,16 +576,24 @@ async function confirmerRetraitMembre(demande) {
         epargne_soldee: true,
       });
     } else if (demande.type === 'pret') {
-      await addDoc(collection(db, 'prets'), {
+      const contratOrigine = state.contracts.find((c) => c.id === demande.contractId);
+      const typeContrat = contratOrigine ? (contratOrigine.type_contrat || 'journalier') : 'journalier';
+      const pretData = {
         contract_id: demande.contractId || null,
         membre_id: demande.memberId,
         collecteur_id: state.currentCollecteurData.uid,
         montant_initial: demande.montant,
-        taux_hebdo: TAUX_HEBDO_PRET,
+        type_contrat: typeContrat,
         interet_deja_reconnu: 0,
         statut: 'actif',
         date_debut: serverTimestamp(),
-      });
+      };
+      if (typeContrat === 'hebdomadaire' || typeContrat === 'mensuel') {
+        pretData.taux_mensuel = TAUX_MENSUEL_PRET_DEFAUT;
+      } else {
+        pretData.taux_hebdo = TAUX_HEBDO_PRET;
+      }
+      await addDoc(collection(db, 'prets'), pretData);
     }
 
     await updateDoc(doc(db, 'withdrawalRequests', demande.id), {
@@ -652,13 +714,34 @@ document.getElementById('form-message-pdg').addEventListener('submit', async (e)
   }
 });
 
-// --- Correctif (23 août 2026) : compte tout versement NON ANNULÉ,
-// immédiatement, sans attendre le verrouillage/confirmation du PDG (24h).
+// ==========================================================
+// --- NOUVEAU (25 août 2026) : calculs généralisés par type de contrat ---
+// Journalier : jour_numero === 1 est la commission (exclue de l'épargne nette).
+// Hebdomadaire / Mensuel : pas de "jour 1 = frais" — tous les versements
+// périodiques comptent en épargne nette ; le frais d'inscription est un
+// document séparé (collection frais_inscription), pas un versement.
+// Les dépenses non compensées diminuent l'épargne nette ; les redistributions
+// reçues l'augmentent.
+// ==========================================================
+
 function calculerEpargneNetteContrat(contrat) {
-  const versements = state.payments.filter((p) => p.contract_id === contrat.id);
-  return versements
-    .filter((p) => p.statut !== 'annule' && p.jour_numero > 1)
-    .reduce((s, p) => s + Number(p.montant || 0), 0);
+  const typeContrat = contrat.type_contrat || 'journalier';
+  const versements = state.payments.filter((p) => p.contract_id === contrat.id && p.statut !== 'annule');
+
+  let epargne;
+  if (typeContrat === 'journalier') {
+    epargne = versements.filter((p) => p.jour_numero !== 1).reduce((s, p) => s + Number(p.montant || 0), 0);
+  } else {
+    epargne = versements.reduce((s, p) => s + Number(p.montant || 0), 0);
+    const depensesNonCompensees = state.depenses
+      .filter((d) => d.contract_id === contrat.id && !d.compensee)
+      .reduce((s, d) => s + Number(d.montant || 0), 0);
+    const redistributionsRecues = state.redistributions
+      .filter((r) => r.contract_id === contrat.id)
+      .reduce((s, r) => s + Number(r.montant || 0), 0);
+    epargne = epargne - depensesNonCompensees + redistributionsRecues;
+  }
+  return epargne;
 }
 
 function nbSemainesEntamees(pret) {
@@ -667,12 +750,7 @@ function nbSemainesEntamees(pret) {
 }
 
 function calculerMontantDuPret(pret) {
-  const nbSemaines = nbSemainesEntamees(pret);
-  const montantDuBrut = pret.montant_initial * (1 + pret.taux_hebdo * nbSemaines);
-  const dejaRembourse = (state.remboursements || [])
-    .filter((r) => r.pret_id === pret.id)
-    .reduce((s, r) => s + Number(r.montant || 0), 0);
-  return Math.max(0, montantDuBrut - dejaRembourse);
+  return calculerMontantDuPretGeneralise(pret, state.remboursements);
 }
 
 function calculerSoldeDisponible(contrat) {
@@ -714,9 +792,12 @@ function renderMembersList() {
   }
 
   contratsAffiches.forEach((contrat) => {
+    const typeContrat = contrat.type_contrat || 'journalier';
+    const infoType = infoTypeContrat(typeContrat);
     const versements = state.payments.filter((p) => p.contract_id === contrat.id);
-    const joursPayes = versements.filter((v) => v.statut !== 'annule').length;
-    const estCloture = contrat.statut === 'cloture' || joursPayes >= 31;
+    const periodesPayees = versements.filter((v) => v.statut !== 'annule').length;
+    const dureeTotale = contrat.duree_totale || infoType.duree;
+    const estCloture = contrat.statut === 'cloture' || periodesPayees >= dureeTotale;
 
     let statut = getStatutContrat(contrat, versements);
     if (!estCloture && calculerStatutContrat(contrat, versementsConfirmesTous) === 'inactif') {
@@ -728,14 +809,19 @@ function renderMembersList() {
     const contratsNonSoldes = trouverContratsNonSoldes(contrat.membre_id, contrat.id);
     const totalNonSolde = contratsNonSoldes.reduce((s, c) => s + Math.max(0, calculerEpargneNetteContrat(c)), 0);
 
+    const depensesNonCompensees = state.depenses.filter((d) => d.contract_id === contrat.id && !d.compensee);
+    const totalDepensesNonCompensees = depensesNonCompensees.reduce((s, d) => s + Number(d.montant || 0), 0);
+
     const row = document.createElement('div');
     row.className = 'member-row';
     row.innerHTML = `
       <div>
-        <strong style="cursor:pointer; text-decoration:underline;" data-membre="${contrat.membre_id}">${contrat.membre_nom || 'Membre'}</strong><br>
-        <small>Jour ${joursPayes}/31</small>
+        <strong style="cursor:pointer; text-decoration:underline;" data-membre="${contrat.membre_id}">${contrat.membre_nom || 'Membre'}</strong>
+        <span class="badge" style="background:#e9ecef; color:#333; margin-left:6px;">${infoType.label}</span><br>
+        <small>${infoType.labelPeriode.charAt(0).toUpperCase() + infoType.labelPeriode.slice(1)} ${periodesPayees}/${dureeTotale}</small>
         ${pret ? `<br><small style="color:#c0392b;">Prêt en cours : ${formatGNF(calculerMontantDuPret(pret))} · Solde disponible : ${formatGNF(soldeDisponible)}</small>` : ''}
         ${totalNonSolde > 0 ? `<br><small style="color:#c0392b; font-weight:bold;">Contrat non soldé : ${formatGNF(totalNonSolde)}</small>` : ''}
+        ${totalDepensesNonCompensees > 0 ? `<br><small style="color:#e67e22; font-weight:bold;">Dépenses non compensées : ${formatGNF(totalDepensesNonCompensees)}</small>` : ''}
       </div>
       <div style="text-align:right;">
         <span class="badge ${statut.classe}">${statut.texte}</span><br>
@@ -747,6 +833,10 @@ function renderMembersList() {
         }
         ${pret ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#c0392b;"
           data-pret="${pret.id}">Rembourser prêt</button>` : ''}
+        ${(typeContrat === 'hebdomadaire' || typeContrat === 'mensuel') && !estCloture ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#e67e22;"
+          data-depense="${contrat.id}" data-nom="${contrat.membre_nom || 'Membre'}">+ Dépense</button>` : ''}
+        ${totalDepensesNonCompensees > 0 ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#2980b9;"
+          data-compenser="${contrat.id}" data-total="${totalDepensesNonCompensees}" data-nom="${contrat.membre_nom || 'Membre'}">Compenser les dépenses</button>` : ''}
       </div>
     `;
     const btnEncaisser = row.querySelector('button[data-contrat]');
@@ -762,13 +852,24 @@ function renderMembersList() {
     if (btnRembourser) {
       btnRembourser.addEventListener('click', () => ouvrirRemboursementPret(pret.id));
     }
+    const btnDepense = row.querySelector('button[data-depense]');
+    if (btnDepense) {
+      btnDepense.addEventListener('click', () => ouvrirNouvelleDepense(contrat));
+    }
+    const btnCompenser = row.querySelector('button[data-compenser]');
+    if (btnCompenser) {
+      btnCompenser.addEventListener('click', () => ouvrirCompensationDepenses(contrat, totalDepensesNonCompensees, depensesNonCompensees));
+    }
     container.appendChild(row);
   });
 }
 
 function getStatutContrat(contrat, versements) {
+  const typeContrat = contrat.type_contrat || 'journalier';
+  const infoType = infoTypeContrat(typeContrat);
+  const dureeTotale = contrat.duree_totale || infoType.duree;
   const versementsNonAnnules = versements.filter((v) => v.statut !== 'annule');
-  if (versementsNonAnnules.length >= 31) return { texte: 'Terminé', classe: 'ok' };
+  if (versementsNonAnnules.length >= dureeTotale) return { texte: 'Terminé', classe: 'ok' };
   if (versementsNonAnnules.length === 0) return { texte: 'À démarrer', classe: 'due' };
 
   const dernier = versementsNonAnnules.reduce((a, b) => (a.jour_numero > b.jour_numero ? a : b));
@@ -784,55 +885,61 @@ function getStatutContrat(contrat, versements) {
 function ouvrirPaiement(contratId) {
   const contrat = state.contracts.find((c) => c.id === contratId);
   if (!contrat) return;
+  const typeContrat = contrat.type_contrat || 'journalier';
+  const infoType = infoTypeContrat(typeContrat);
+  const dureeTotale = contrat.duree_totale || infoType.duree;
   const versements = state.payments.filter((p) => p.contract_id === contratId && p.statut !== 'annule');
-  const prochainJour = versements.length + 1;
-  const joursRestants = 31 - versements.length;
+  const prochainePeriode = versements.length + 1;
+  const periodesRestantes = dureeTotale - versements.length;
 
-  if (joursRestants <= 0) {
-    notifier('Ce contrat a déjà atteint 31 jours. Démarrez un nouveau contrat.', 'erreur');
+  if (periodesRestantes <= 0) {
+    notifier(`Ce contrat a déjà atteint ${dureeTotale} ${infoType.labelPeriode}(s). Démarrez un nouveau contrat.`, 'erreur');
     return;
   }
 
-  const montant = prompt(`Montant reçu de ${contrat.membre_nom} (cotisation journalière : ${formatGNF(contrat.montant_mise)}, à partir du jour ${prochainJour}/31) :`);
+  const montant = prompt(`Montant reçu de ${contrat.membre_nom} (${infoType.labelVersement} : ${formatGNF(contrat.montant_mise)}, à partir de la période ${prochainePeriode}/${dureeTotale}) :`);
   if (montant === null) return;
   const montantNum = parseFloat(montant);
   if (isNaN(montantNum) || montantNum <= 0) {
     notifier('Montant invalide.', 'erreur');
     return;
   }
-  enregistrerVersement(contrat, montantNum, prochainJour, joursRestants);
+  enregistrerVersement(contrat, montantNum, prochainePeriode, periodesRestantes);
 }
 
-async function enregistrerVersement(contrat, montantSaisi, jourDepart, joursRestants) {
+async function enregistrerVersement(contrat, montantSaisi, periodeDepart, periodesRestantes) {
   try {
-    const montantJournalier = Number(contrat.montant_mise) || montantSaisi;
-    const joursCouverts = Math.max(1, Math.min(Math.round(montantSaisi / montantJournalier), joursRestants));
-    const montantAccepte = joursCouverts * montantJournalier;
+    const montantPeriode = Number(contrat.montant_mise) || montantSaisi;
+    const periodesCouvertes = Math.max(1, Math.min(Math.round(montantSaisi / montantPeriode), periodesRestantes));
+    const montantAccepte = periodesCouvertes * montantPeriode;
     const montantExcedent = montantSaisi - montantAccepte;
+    const typeContrat = contrat.type_contrat || 'journalier';
+    const infoType = infoTypeContrat(typeContrat);
+    const dureeTotale = contrat.duree_totale || infoType.duree;
 
-    for (let i = 0; i < joursCouverts; i++) {
+    for (let i = 0; i < periodesCouvertes; i++) {
       await addDoc(collection(db, 'payments'), {
         contract_id: contrat.id,
         collecteur_id: state.currentCollecteurData.uid,
         membre_id: contrat.membre_id,
-        montant: montantJournalier,
-        jour_numero: jourDepart + i,
+        montant: montantPeriode,
+        jour_numero: periodeDepart + i,
         statut: 'collecte',
         date: serverTimestamp(),
       });
     }
 
-    const jourFinal = jourDepart + joursCouverts - 1;
-    if (jourFinal >= 31) {
+    const periodeFinale = periodeDepart + periodesCouvertes - 1;
+    if (periodeFinale >= dureeTotale) {
       await updateDoc(doc(db, 'contracts', contrat.id), { statut: 'cloture' });
     }
 
     if (montantExcedent > 0) {
-      notifier(`${joursCouverts} jour(s) enregistré(s) (jour ${jourDepart} à ${jourFinal}) = ${formatGNF(montantAccepte)}. Excédent de ${formatGNF(montantExcedent)} NON enregistré — ouvrez un nouveau contrat pour ce reliquat.`, 'erreur');
+      notifier(`${periodesCouvertes} ${infoType.labelPeriode}(s) enregistrée(s) (${periodeDepart} à ${periodeFinale}) = ${formatGNF(montantAccepte)}. Excédent de ${formatGNF(montantExcedent)} NON enregistré — ouvrez un nouveau contrat pour ce reliquat.`, 'erreur');
     } else {
-      notifier(`Versement enregistré : ${joursCouverts} jour(s) couvert(s) (jour ${jourDepart} à ${jourFinal}).`, 'succes');
+      notifier(`Versement enregistré : ${periodesCouvertes} ${infoType.labelPeriode}(s) couverte(s) (${periodeDepart} à ${periodeFinale}).`, 'succes');
     }
-    afficherRecu({ nom: contrat.membre_nom, montant: montantAccepte, jour: jourFinal, date: new Date() });
+    afficherRecu({ nom: contrat.membre_nom, montant: montantAccepte, jour: periodeFinale, duree: dureeTotale, date: new Date() });
   } catch (err) {
     console.error(err);
     notifier('Erreur : ' + err.message, 'erreur');
@@ -842,15 +949,27 @@ async function enregistrerVersement(contrat, montantSaisi, jourDepart, joursRest
 function ouvrirNouveauContrat(membreId, membreNom) {
   ouvrirModal(`
     <h2>Nouveau contrat — ${membreNom}</h2>
-    <p class="subtitle-sm">Ce membre a terminé son précédent cycle de 31 jours. Démarrez un nouveau contrat et enregistrez son 1er versement (commission).</p>
+    <p class="subtitle-sm">Choisissez le type de contrat et démarrez-le.</p>
     <form id="form-nouveau-contrat">
       <div class="field-row">
-        <label>Montant du versement quotidien (GNF)</label>
-        <input type="number" name="montantJour" min="1" required />
+        <label>Type de contrat</label>
+        <select name="typeContrat" id="select-type-contrat-nc" required>
+          <option value="journalier">${TYPES_CONTRAT.journalier.label}</option>
+          <option value="hebdomadaire">${TYPES_CONTRAT.hebdomadaire.label}</option>
+          <option value="mensuel">${TYPES_CONTRAT.mensuel.label}</option>
+        </select>
       </div>
       <div class="field-row">
+        <label id="label-montant-periode-nc">Montant du versement quotidien (GNF)</label>
+        <input type="number" name="montantPeriode" min="1" required />
+      </div>
+      <div class="field-row" id="champ-commission-nc">
         <label>Commission encaissée aujourd'hui (jour 1, GNF)</label>
-        <input type="number" name="commission" min="1" required />
+        <input type="number" name="commission" min="1" />
+      </div>
+      <div class="field-row hidden" id="champ-frais-inscription-nc">
+        <label>Frais d'inscription (GNF)</label>
+        <input type="number" name="fraisInscription" min="0" />
       </div>
       <div class="modal-actions">
         <button type="button" class="secondary" id="modal-annuler-nouveau-contrat" style="flex:1;">Annuler</button>
@@ -858,34 +977,27 @@ function ouvrirNouveauContrat(membreId, membreNom) {
       </div>
     </form>
   `);
+  document.getElementById('select-type-contrat-nc').addEventListener('change', (e) => {
+    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nc', 'champ-commission-nc', 'champ-frais-inscription-nc');
+  });
   document.getElementById('modal-annuler-nouveau-contrat').addEventListener('click', fermerModal);
   document.getElementById('form-nouveau-contrat').addEventListener('submit', async (e) => {
     e.preventDefault();
     const fd = new FormData(e.target);
-    const montantJour = Number(fd.get('montantJour'));
-    const commission = Number(fd.get('commission'));
+    const typeContrat = fd.get('typeContrat');
+    const montantPeriode = Number(fd.get('montantPeriode'));
+    const commission = Number(fd.get('commission') || 0);
+    const fraisInscription = Number(fd.get('fraisInscription') || 0);
 
     try {
-      const contratRef = await addDoc(collection(db, 'contracts'), {
-        membre_id: membreId,
-        membre_nom: membreNom,
-        collecteur_id: state.currentCollecteurData.uid,
-        statut: 'actif',
+      await creerContratEtPremierePeriode({
+        membreId,
+        membreNom,
+        typeContrat,
+        montantPeriode,
         commission,
-        montant_mise: montantJour,
-        date_debut: new Date().toISOString(),
+        fraisInscription,
       });
-
-      await addDoc(collection(db, 'payments'), {
-        contract_id: contratRef.id,
-        collecteur_id: state.currentCollecteurData.uid,
-        membre_id: membreId,
-        montant: commission,
-        jour_numero: 1,
-        statut: 'collecte',
-        date: serverTimestamp(),
-      });
-
       notifier('Nouveau contrat créé.', 'succes');
       fermerModal();
     } catch (err) {
@@ -895,70 +1007,214 @@ function ouvrirNouveauContrat(membreId, membreNom) {
   });
 }
 
-function ouvrirRemboursementPret(pretId) {
-  const pret = state.prets.find((p) => p.id === pretId);
-  if (!pret) return;
-  const montantDu = calculerMontantDuPret(pret);
-  const montant = prompt(`Montant dû : ${formatGNF(montantDu)}\nMontant remboursé aujourd'hui :`);
-  if (montant === null) return;
-  const montantNum = parseFloat(montant);
-  if (isNaN(montantNum) || montantNum <= 0) {
-    notifier('Montant invalide.', 'erreur');
-    return;
+// Bascule l'affichage des champs "commission jour 1" (journalier) vs
+// "frais d'inscription" (hebdo/mensuel) selon le type choisi.
+function basculerChampsTypeContrat(typeContrat, labelMontantId, champCommissionId, champFraisId) {
+  const infoType = infoTypeContrat(typeContrat);
+  document.getElementById(labelMontantId).textContent = `Montant du ${infoType.labelVersement} (GNF)`;
+  const champCommission = document.getElementById(champCommissionId);
+  const champFrais = document.getElementById(champFraisId);
+  if (typeContrat === 'journalier') {
+    champCommission.classList.remove('hidden');
+    champFrais.classList.add('hidden');
+    champCommission.querySelector('input').required = true;
+    champFrais.querySelector('input').required = false;
+  } else {
+    champCommission.classList.add('hidden');
+    champFrais.classList.remove('hidden');
+    champCommission.querySelector('input').required = false;
+    champFrais.querySelector('input').required = false;
   }
-  enregistrerRemboursement(pret, montantNum, montantDu);
 }
 
-async function enregistrerRemboursement(pret, montant, montantDuAvant) {
-  try {
-    const nbSemaines = nbSemainesEntamees(pret);
-    const interetAccumule = pret.montant_initial * pret.taux_hebdo * nbSemaines;
-    const interetDejaReconnu = Number(pret.interet_deja_reconnu || 0);
-    const interetNonReconnu = Math.max(0, interetAccumule - interetDejaReconnu);
-    const interetReconnuMaintenant = Math.min(montant, interetNonReconnu);
+// Crée le contrat + (journalier : versement jour 1 = commission) OU
+// (hebdo/mensuel : document frais_inscription séparé, réparti selon
+// les % réglés par le PDG dans parametres/interets_types_annuels).
+async function creerContratEtPremierePeriode({ membreId, membreNom, typeContrat, montantPeriode, commission, fraisInscription }) {
+  const infoType = infoTypeContrat(typeContrat);
+  const contratData = {
+    membre_id: membreId,
+    membre_nom: membreNom,
+    collecteur_id: state.currentCollecteurData.uid,
+    statut: 'actif',
+    type_contrat: typeContrat,
+    duree_totale: infoType.duree,
+    montant_mise: montantPeriode,
+    date_debut: new Date().toISOString(),
+  };
+  if (typeContrat === 'journalier') {
+    contratData.commission = commission;
+  } else {
+    contratData.frais_inscription = fraisInscription;
+  }
 
-    await addDoc(collection(db, 'remboursements_prets'), {
-      pret_id: pret.id,
-      membre_id: pret.membre_id,
+  const contratRef = await addDoc(collection(db, 'contracts'), contratData);
+
+  if (typeContrat === 'journalier') {
+    await addDoc(collection(db, 'payments'), {
+      contract_id: contratRef.id,
       collecteur_id: state.currentCollecteurData.uid,
-      enregistre_par_role: 'collecteur',
-      enregistre_par_uid: state.currentCollecteurData.uid,
-      montant,
+      membre_id: membreId,
+      montant: commission,
+      jour_numero: 1,
+      statut: 'collecte',
       date: serverTimestamp(),
     });
+  } else if (fraisInscription > 0) {
+    const montantPdg = fraisInscription * state.parametresInterets.pdg;
+    const montantCollecteur = fraisInscription * state.parametresInterets.collecteur;
+    await addDoc(collection(db, 'frais_inscription'), {
+      contract_id: contratRef.id,
+      membre_id: membreId,
+      collecteur_id: state.currentCollecteurData.uid,
+      montant_total: fraisInscription,
+      montant_pdg: montantPdg,
+      montant_collecteur: montantCollecteur,
+      date: serverTimestamp(),
+    });
+  }
 
-    if (interetReconnuMaintenant > 0) {
-      const montantCollecteur = interetReconnuMaintenant * PART_INTERET_COLLECTEUR;
-      const montantPdg = interetReconnuMaintenant * PART_INTERET_PDG;
-      await addDoc(collection(db, 'interets_prets_repartis'), {
-        pret_id: pret.id,
-        membre_id: pret.membre_id,
+  return contratRef;
+}
+
+// ==========================================================
+// --- NOUVEAU (25 août 2026) : gestion des dépenses (hebdo/mensuel) ---
+// ==========================================================
+
+function ouvrirNouvelleDepense(contrat) {
+  ouvrirModal(`
+    <h2>Nouvelle dépense — ${contrat.membre_nom}</h2>
+    <p class="subtitle-sm">Cette dépense diminuera immédiatement l'épargne nette du membre. Elle restera visible comme justificatif tant qu'elle n'est pas compensée.</p>
+    <form id="form-nouvelle-depense">
+      <div class="field-row">
+        <label>Date de la dépense</label>
+        <input type="date" name="date" required value="${new Date().toISOString().slice(0, 10)}" />
+      </div>
+      <div class="field-row">
+        <label>Libellé</label>
+        <input type="text" name="libelle" required placeholder="Ex : frais de dossier, pénalité..." />
+      </div>
+      <div class="field-row">
+        <label>Montant (GNF)</label>
+        <input type="number" name="montant" min="1" required />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="modal-annuler-depense" style="flex:1;">Annuler</button>
+        <button type="submit" style="flex:1;">Enregistrer la dépense</button>
+      </div>
+    </form>
+  `);
+  document.getElementById('modal-annuler-depense').addEventListener('click', fermerModal);
+  document.getElementById('form-nouvelle-depense').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const dateDepense = fd.get('date');
+    const libelle = fd.get('libelle').trim();
+    const montant = Number(fd.get('montant'));
+
+    try {
+      await addDoc(collection(db, 'depenses'), {
+        contract_id: contrat.id,
+        membre_id: contrat.membre_id,
+        membre_nom: contrat.membre_nom,
         collecteur_id: state.currentCollecteurData.uid,
-        montant_collecteur: montantCollecteur,
-        montant_pdg: montantPdg,
+        date_depense: dateDepense,
+        libelle,
+        montant,
+        compensee: false,
         date: serverTimestamp(),
       });
-      await updateDoc(doc(db, 'prets', pret.id), {
-        interet_deja_reconnu: interetDejaReconnu + interetReconnuMaintenant,
-      });
+      notifier('Dépense enregistrée.', 'succes');
+      fermerModal();
+    } catch (err) {
+      console.error(err);
+      notifier('Erreur : ' + err.message, 'erreur');
     }
+  });
+}
 
-    if (montant >= montantDuAvant) {
-      await updateDoc(doc(db, 'prets', pret.id), { statut: 'rembourse' });
-      notifier('Prêt entièrement remboursé.', 'succes');
-    } else {
-      notifier('Remboursement enregistré.', 'succes');
+function ouvrirCompensationDepenses(contrat, totalNonCompense, depensesNonCompensees) {
+  ouvrirModal(`
+    <h2>Compenser les dépenses — ${contrat.membre_nom}</h2>
+    <p class="subtitle-sm">Total des dépenses non compensées : <b>${formatGNF(totalNonCompense)}</b></p>
+    <div style="max-height:180px; overflow-y:auto; margin:10px 0;">
+      ${depensesNonCompensees.map((d) => `
+        <div class="soldes-row"><span>${d.date_depense || ''} — ${d.libelle}</span><span>${formatGNF(d.montant)}</span></div>
+      `).join('')}
+    </div>
+    <form id="form-compensation-depenses">
+      <div class="field-row">
+        <label>Montant versé pour compenser (GNF)</label>
+        <input type="number" name="montant" min="1" max="${totalNonCompense}" value="${totalNonCompense}" required />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="modal-annuler-compensation" style="flex:1;">Annuler</button>
+        <button type="submit" style="flex:1;">Confirmer la compensation</button>
+      </div>
+    </form>
+  `);
+  document.getElementById('modal-annuler-compensation').addEventListener('click', fermerModal);
+  document.getElementById('form-compensation-depenses').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const montant = Number(new FormData(e.target).get('montant'));
+    try {
+      await enregistrerCompensationDepenses(depensesNonCompensees, montant);
+      notifier('Compensation enregistrée.', 'succes');
+      fermerModal();
+    } catch (err) {
+      console.error(err);
+      notifier('Erreur : ' + err.message, 'erreur');
     }
-  } catch (err) {
-    console.error(err);
-    notifier('Erreur : ' + err.message, 'erreur');
+  });
+}
+
+// Compense les dépenses les plus anciennes en premier, jusqu'à épuisement
+// du montant versé. Une dépense partiellement compensée reste non compensée
+// pour son reliquat (nouvelle ligne de dépense pour le reliquat, l'originale
+// passe compensee=true pour la part couverte).
+async function enregistrerCompensationDepenses(depensesNonCompensees, montantVerse) {
+  let restant = montantVerse;
+  const triees = [...depensesNonCompensees].sort((a, b) => (a.date_depense || '').localeCompare(b.date_depense || ''));
+
+  for (const d of triees) {
+    if (restant <= 0) break;
+    const montantDepense = Number(d.montant || 0);
+    if (restant >= montantDepense) {
+      await updateDoc(doc(db, 'depenses', d.id), {
+        compensee: true,
+        date_compensation: serverTimestamp(),
+        montant_compense: montantDepense,
+      });
+      restant -= montantDepense;
+    } else {
+      // Compensation partielle : on clôture la ligne d'origine pour la part
+      // couverte et on recrée une ligne pour le reliquat non compensé.
+      await updateDoc(doc(db, 'depenses', d.id), {
+        compensee: true,
+        date_compensation: serverTimestamp(),
+        montant_compense: restant,
+        montant: restant,
+      });
+      await addDoc(collection(db, 'depenses'), {
+        contract_id: d.contract_id,
+        membre_id: d.membre_id,
+        membre_nom: d.membre_nom,
+        collecteur_id: d.collecteur_id,
+        date_depense: d.date_depense,
+        libelle: d.libelle + ' (reliquat non compensé)',
+        montant: montantDepense - restant,
+        compensee: false,
+        date: serverTimestamp(),
+      });
+      restant = 0;
+    }
   }
 }
 
 document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
   ouvrirModal(`
     <h2>Nouveau membre</h2>
-    <p class="subtitle-sm">Créez le compte du membre et enregistrez son 1er versement (commission). Un mot de passe est généré automatiquement à partir de son numéro de téléphone.</p>
+    <p class="subtitle-sm">Créez le compte du membre, choisissez son type de contrat et enregistrez sa 1ère opération. Un mot de passe est généré automatiquement à partir de son numéro de téléphone.</p>
       <form id="form-nouveau-membre">
         <div class="field-row">
           <label>Nom et prénom du membre</label>
@@ -977,12 +1233,24 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
           <input type="text" name="residence" required />
         </div>
         <div class="field-row">
-          <label>Montant du versement quotidien (GNF)</label>
-          <input type="number" name="montantJour" min="1" required />
+          <label>Type de contrat</label>
+          <select name="typeContrat" id="select-type-contrat-nm" required>
+            <option value="journalier">${TYPES_CONTRAT.journalier.label}</option>
+            <option value="hebdomadaire">${TYPES_CONTRAT.hebdomadaire.label}</option>
+            <option value="mensuel">${TYPES_CONTRAT.mensuel.label}</option>
+          </select>
         </div>
         <div class="field-row">
+          <label id="label-montant-periode-nm">Montant du versement quotidien (GNF)</label>
+          <input type="number" name="montantPeriode" min="1" required />
+        </div>
+        <div class="field-row" id="champ-commission-nm">
           <label>Commission encaissée aujourd'hui (jour 1, GNF)</label>
-          <input type="number" name="commission" min="1" required />
+          <input type="number" name="commission" min="1" />
+        </div>
+        <div class="field-row hidden" id="champ-frais-inscription-nm">
+          <label>Frais d'inscription (GNF)</label>
+          <input type="number" name="fraisInscription" min="0" />
         </div>
         <div class="modal-actions">
           <button type="button" class="secondary" id="modal-annuler-membre" style="flex:1;">Annuler</button>
@@ -990,6 +1258,9 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
         </div>
       </form>
   `);
+  document.getElementById('select-type-contrat-nm').addEventListener('change', (e) => {
+    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nm', 'champ-commission-nm', 'champ-frais-inscription-nm');
+  });
   document.getElementById('modal-annuler-membre').addEventListener('click', fermerModal);
   document.getElementById('form-nouveau-membre').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -999,8 +1270,10 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
     const email = fd.get('email').trim();
     const residence = fd.get('residence').trim();
     const password = genererMotDePasseMembre(telephone);
-    const montantJour = Number(fd.get('montantJour'));
-    const commission = Number(fd.get('commission'));
+    const typeContrat = fd.get('typeContrat');
+    const montantPeriode = Number(fd.get('montantPeriode'));
+    const commission = Number(fd.get('commission') || 0);
+    const fraisInscription = Number(fd.get('fraisInscription') || 0);
 
     try {
       const emailTechnique = telephoneVersEmailTechnique(telephone);
@@ -1014,24 +1287,13 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
         date_creation: serverTimestamp(),
       });
 
-      const contratRef = await addDoc(collection(db, 'contracts'), {
-        membre_id: uid,
-        membre_nom: nom,
-        collecteur_id: state.currentCollecteurData.uid,
-        statut: 'actif',
+      await creerContratEtPremierePeriode({
+        membreId: uid,
+        membreNom: nom,
+        typeContrat,
+        montantPeriode,
         commission,
-        montant_mise: montantJour,
-        date_debut: new Date().toISOString(),
-      });
-
-      await addDoc(collection(db, 'payments'), {
-        contract_id: contratRef.id,
-        collecteur_id: state.currentCollecteurData.uid,
-        membre_id: uid,
-        montant: commission,
-        jour_numero: 1,
-        statut: 'collecte',
-        date: serverTimestamp(),
+        fraisInscription,
       });
 
       fermerModal();
@@ -1061,7 +1323,7 @@ function afficherRecu(data) {
     <hr>
     <p style="margin:12px 0;"><strong>${data.nom}</strong></p>
     <p style="font-size:22px; color:#198754; font-weight:bold;">${formatGNF(data.montant)}</p>
-    <p>Jour ${data.jour} / 31</p>
+    <p>Période ${data.jour} / ${data.duree}</p>
     <p style="color:#999; font-size:13px; margin-top:12px;">
       ${data.date.toLocaleDateString('fr-FR')} à ${data.date.toLocaleTimeString('fr-FR')}
     </p>
@@ -1103,15 +1365,15 @@ function afficherIdentifiants(data) {
 
 // --- Correctif (23 août 2026) : versement comptabilisé = tout ce qui n'est pas annulé.
 async function afficherDetailsMembre(contrat) {
+  const typeContrat = contrat.type_contrat || 'journalier';
+  const infoType = infoTypeContrat(typeContrat);
+  const dureeTotale = contrat.duree_totale || infoType.duree;
   const versements = state.payments.filter((p) => p.contract_id === contrat.id);
   const versementsComptes = versements.filter((p) => p.statut !== 'annule');
   const versementsEnAttenteVerrou = versements.filter((p) => p.statut === 'collecte');
   const totalConfirme = versementsComptes.reduce((s, p) => s + Number(p.montant || 0), 0);
   const totalNonConfirme = versementsEnAttenteVerrou.reduce((s, p) => s + Number(p.montant || 0), 0);
-  const commissionConfirmee = versementsComptes
-    .filter((p) => p.jour_numero === 1)
-    .reduce((s, p) => s + Number(p.montant || 0), 0);
-  const epargneNette = totalConfirme - commissionConfirmee;
+  const epargneNette = calculerEpargneNetteContrat(contrat);
   const soldeDisponible = calculerSoldeDisponible(contrat);
 
   let telephone = '—';
@@ -1129,21 +1391,159 @@ async function afficherDetailsMembre(contrat) {
 
   const pret = (state.prets || []).find((p) => p.contract_id === contrat.id && p.statut === 'actif');
 
+  const depensesContrat = state.depenses.filter((d) => d.contract_id === contrat.id)
+    .sort((a, b) => (b.date_depense || '').localeCompare(a.date_depense || ''));
+
   ouvrirModal(`
     <h2>${contrat.membre_nom}</h2>
-    <p class="subtitle-sm">Téléphone : ${telephone} · Résidence : ${residence}</p>
+    <p class="subtitle-sm">Téléphone : ${telephone} · Résidence : ${residence} · Type : ${infoType.label}</p>
     <div class="soldes-row"><span>Épargne nette : <b>${formatGNF(epargneNette > 0 ? epargneNette : 0)}</b></span></div>
     ${pret ? `<div class="soldes-row"><span style="color:#c0392b;">Solde disponible (après prêt)</span><span style="color:#c0392b;"><b>${formatGNF(soldeDisponible)}</b></span></div>` : ''}
     <div class="soldes-row"><span>Versement comptabilisé : <b>${formatGNF(totalConfirme)}</b></span></div>
     <div class="soldes-row"><span>En attente de verrouillage (24h) : <b>${formatGNF(totalNonConfirme)}</b></span></div>
-    <div class="soldes-row"><span>Montant du versement quotidien : <b>${formatGNF(contrat.montant_mise || 0)}</b></span></div>
-    <div class="soldes-row"><span>Jours payés : <b>${versementsComptes.length}/31</b></span></div>
+    <div class="soldes-row"><span>Montant du ${infoType.labelVersement} : <b>${formatGNF(contrat.montant_mise || 0)}</b></span></div>
+    <div class="soldes-row"><span>${infoType.labelPeriode.charAt(0).toUpperCase() + infoType.labelPeriode.slice(1)}(s) payé(s) : <b>${versementsComptes.length}/${dureeTotale}</b></span></div>
     ${totalNonSolde > 0 ? `<div class="soldes-row"><span style="color:#c0392b;">Contrat(s) non soldé(s)</span><span style="color:#c0392b;"><b>${formatGNF(totalNonSolde)}</b></span></div>` : ""}
+    ${depensesContrat.length > 0 ? `
+      <h2 style="margin-top:14px; font-size:15px;">Dépenses de ce contrat</h2>
+      <div style="max-height:150px; overflow-y:auto; margin-top:6px;">
+        ${depensesContrat.map((d) => `
+          <div class="soldes-row"><span>${d.date_depense || ''} — ${d.libelle} ${d.compensee ? '<span style="color:#198754;">(compensée)</span>' : '<span style="color:#e67e22;">(non compensée)</span>'}</span><span>${formatGNF(d.montant)}</span></div>
+        `).join('')}
+      </div>
+    ` : ''}
     <div class="modal-actions">
       <button type="button" class="secondary" id="modal-fermer-details" style="flex:1;">Fermer</button>
     </div>
   `);
   document.getElementById('modal-fermer-details').addEventListener('click', fermerModal);
+}
+
+function ouvrirRemboursementPret(pretId) {
+  const pret = state.prets.find((p) => p.id === pretId);
+  if (!pret) return;
+  const montantDu = calculerMontantDuPret(pret);
+  const montant = prompt(`Montant dû : ${formatGNF(montantDu)}\nMontant remboursé aujourd'hui :`);
+  if (montant === null) return;
+  const montantNum = parseFloat(montant);
+  if (isNaN(montantNum) || montantNum <= 0) {
+    notifier('Montant invalide.', 'erreur');
+    return;
+  }
+  enregistrerRemboursement(pret, montantNum, montantDu);
+}
+
+// ==========================================================
+// --- NOUVEAU (25 août 2026) : répartition d'intérêt généralisée ---
+// Journalier : 70% PDG / 30% collecteur (fixe, historique).
+// Hebdomadaire / Mensuel : %PDG / %collecteur / %redistribution réglés
+// par le PDG (state.parametresInterets). La part "redistribution" est
+// répartie immédiatement entre les membres à contrat annuel actif DU MÊME
+// COLLECTEUR, au prorata de leur cotisation périodique.
+// ==========================================================
+
+async function enregistrerRemboursement(pret, montant, montantDuAvant) {
+  try {
+    const typeContrat = pret.type_contrat || 'journalier';
+    let interetAccumule;
+    if (typeContrat === 'hebdomadaire' || typeContrat === 'mensuel') {
+      const nbMoisEntamesFn = (await import('./utils.js')).nbMoisEntames;
+      const nbMois = nbMoisEntamesFn(pret.date_debut);
+      interetAccumule = pret.montant_initial * (pret.taux_mensuel || TAUX_MENSUEL_PRET_DEFAUT) * nbMois;
+    } else {
+      const nbSemaines = nbSemainesEntamees(pret);
+      interetAccumule = pret.montant_initial * (pret.taux_hebdo || TAUX_HEBDO_PRET) * nbSemaines;
+    }
+    const interetDejaReconnu = Number(pret.interet_deja_reconnu || 0);
+    const interetNonReconnu = Math.max(0, interetAccumule - interetDejaReconnu);
+    const interetReconnuMaintenant = Math.min(montant, interetNonReconnu);
+
+    await addDoc(collection(db, 'remboursements_prets'), {
+      pret_id: pret.id,
+      membre_id: pret.membre_id,
+      collecteur_id: state.currentCollecteurData.uid,
+      enregistre_par_role: 'collecteur',
+      enregistre_par_uid: state.currentCollecteurData.uid,
+      montant,
+      date: serverTimestamp(),
+    });
+
+    if (interetReconnuMaintenant > 0) {
+      if (typeContrat === 'hebdomadaire' || typeContrat === 'mensuel') {
+        const { pdg, collecteur, redistribution } = state.parametresInterets;
+        const montantPdg = interetReconnuMaintenant * pdg;
+        const montantCollecteur = interetReconnuMaintenant * collecteur;
+        const montantRedistribution = interetReconnuMaintenant * redistribution;
+
+        await addDoc(collection(db, 'interets_prets_repartis'), {
+          pret_id: pret.id,
+          membre_id: pret.membre_id,
+          collecteur_id: state.currentCollecteurData.uid,
+          montant_collecteur: montantCollecteur,
+          montant_pdg: montantPdg,
+          montant_redistribution: montantRedistribution,
+          date: serverTimestamp(),
+        });
+
+        if (montantRedistribution > 0) {
+          await redistribuerAuxMembresAnnuels(pret, montantRedistribution);
+        }
+      } else {
+        const montantCollecteur = interetReconnuMaintenant * PART_INTERET_COLLECTEUR;
+        const montantPdg = interetReconnuMaintenant * PART_INTERET_PDG;
+        await addDoc(collection(db, 'interets_prets_repartis'), {
+          pret_id: pret.id,
+          membre_id: pret.membre_id,
+          collecteur_id: state.currentCollecteurData.uid,
+          montant_collecteur: montantCollecteur,
+          montant_pdg: montantPdg,
+          date: serverTimestamp(),
+        });
+      }
+      await updateDoc(doc(db, 'prets', pret.id), {
+        interet_deja_reconnu: interetDejaReconnu + interetReconnuMaintenant,
+      });
+    }
+
+    if (montant >= montantDuAvant) {
+      await updateDoc(doc(db, 'prets', pret.id), { statut: 'rembourse' });
+      notifier('Prêt entièrement remboursé.', 'succes');
+    } else {
+      notifier('Remboursement enregistré.', 'succes');
+    }
+  } catch (err) {
+    console.error(err);
+    notifier('Erreur : ' + err.message, 'erreur');
+  }
+}
+
+// Répartit un montant entre les membres à contrat hebdo/mensuel actif DU MÊME
+// COLLECTEUR que le prêt d'origine (pas tous les collecteurs de l'entreprise),
+// au prorata de leur cotisation périodique.
+async function redistribuerAuxMembresAnnuels(pretOrigine, montantARepartir) {
+  const beneficiaires = state.contracts.filter((c) =>
+    c.statut === 'actif' &&
+    (c.type_contrat === 'hebdomadaire' || c.type_contrat === 'mensuel') &&
+    c.id !== pretOrigine.contract_id
+  );
+  if (beneficiaires.length === 0) return;
+
+  const totalCotisations = beneficiaires.reduce((s, c) => s + Number(c.montant_mise || 0), 0);
+  if (totalCotisations <= 0) return;
+
+  for (const contrat of beneficiaires) {
+    const part = (Number(contrat.montant_mise || 0) / totalCotisations) * montantARepartir;
+    if (part <= 0) continue;
+    await addDoc(collection(db, 'redistributions_interets'), {
+      pret_id: pretOrigine.id,
+      contract_id: contrat.id,
+      membre_id: contrat.membre_id,
+      membre_nom: contrat.membre_nom,
+      collecteur_id: state.currentCollecteurData.uid,
+      montant: part,
+      date: serverTimestamp(),
+    });
+  }
 }
 
 function ouvrirModal(html) {
