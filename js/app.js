@@ -38,6 +38,8 @@ const state = {
   depenses: [],
   redistributions: [],
   parametresInterets: { pdg: 0.70, collecteur: 0.30, redistribution: 0 },
+  // --- NOUVEAU (2 sept 2026) : reconductions de contrat à finaliser ---
+  propositionsReconduction: [],
   unsubscribers: [],
 };
 let creationEnCours = false;
@@ -369,17 +371,26 @@ function lancerDashboard() {
     }
     renderAll();
   });
+  // --- NOUVEAU (2 sept 2026) : reconductions de contrat à finaliser ---
+  const unsubPropositions = onSnapshot(
+    query(collection(db, 'propositions_reconduction'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.propositionsReconduction = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
 
   state.unsubscribers.push(
     unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements,
     unsubRetraits, unsubInterets, unsubRetraitsCommission, unsubDiffusions, unsubMesMessages,
-    unsubFraisInscription, unsubDepenses, unsubRedistributions, unsubParametres
+    unsubFraisInscription, unsubDepenses, unsubRedistributions, unsubParametres, unsubPropositions
   );
 }
 
 function renderAll() {
   renderCollecteurHeader();
   renderRetraitsMembres();
+  renderReconductionsATraiter();
   renderCommunicationCollecteur();
   renderMembersList();
 }
@@ -566,6 +577,134 @@ function renderRetraitsMembres() {
     });
 }
 
+// ==========================================================
+// --- NOUVEAU (2 sept 2026) : reconductions de contrat à finaliser ---
+// Après un retrait_final confirmé (Cas 4, clôture), une proposition de
+// reconduction est créée pour le membre. Une fois qu'il a répondu
+// ("reconduit_meme_termes" ou "reconduit_modifie"), elle apparaît ici pour
+// que le collecteur crée réellement le nouveau contrat + le versement jour 1
+// au moment où il encaisse la 1ère cotisation en personne.
+// ==========================================================
+
+function renderReconductionsATraiter() {
+  const enAttenteTraitement = state.propositionsReconduction.filter(
+    (p) => p.statut === 'reconduit_meme_termes' || p.statut === 'reconduit_modifie'
+  );
+
+  let zone = document.getElementById('reconductionsZone');
+  if (!zone) {
+    zone = document.createElement('div');
+    zone.id = 'reconductionsZone';
+    zone.className = 'card';
+    zone.style.marginBottom = '14px';
+    const retraitsListEl = document.getElementById('retraitsList');
+    if (retraitsListEl && retraitsListEl.parentElement) {
+      retraitsListEl.parentElement.insertAdjacentElement('beforebegin', zone);
+    } else {
+      dashboard.prepend(zone);
+    }
+  }
+
+  if (enAttenteTraitement.length === 0) {
+    zone.innerHTML = '';
+    return;
+  }
+
+  zone.innerHTML = `
+    <h3 style="font-size:14px; margin-bottom:8px;">Reconductions de contrat à finaliser</h3>
+    <p style="color:#666; font-size:12px; margin-bottom:10px;">Le membre a accepté de reconduire son épargne. Créez le nouveau contrat au moment où vous encaissez son 1er versement.</p>
+    ${enAttenteTraitement.map((p) => {
+      const infoType = infoTypeContrat(p.type_contrat_precedent || 'journalier');
+      const montantAffiche = p.statut === 'reconduit_modifie' ? p.nouveau_montant_mise : p.montant_mise_precedent;
+      const libelleModif = p.statut === 'reconduit_modifie' ? ' (montant modifié demandé)' : ' (mêmes conditions)';
+      return `
+        <div class="retrait-row">
+          <div class="retrait-row-top">
+            <div>
+              <strong>${p.membre_nom || 'Membre'}</strong><br>
+              <small>${infoType.label}${libelleModif}</small><br>
+              <small style="color:#999;">${infoType.labelVersement} suggéré : ${formatGNF(montantAffiche)}</small>
+            </div>
+          </div>
+          <div class="retrait-actions">
+            <button type="button" data-action="finaliser-reconduction" data-id="${p.id}">Encaisser le 1er versement / Créer le contrat</button>
+          </div>
+        </div>
+      `;
+    }).join('')}
+  `;
+
+  zone.querySelectorAll('[data-action="finaliser-reconduction"]').forEach((btn) => {
+    btn.addEventListener('click', () => ouvrirFinalisationReconduction(btn.dataset.id));
+  });
+}
+
+function ouvrirFinalisationReconduction(propositionId) {
+  const proposition = state.propositionsReconduction.find((p) => p.id === propositionId);
+  if (!proposition) return;
+
+  const typeContrat = proposition.type_contrat_precedent || 'journalier';
+  const montantPeriodeSuggere = proposition.statut === 'reconduit_modifie'
+    ? proposition.nouveau_montant_mise
+    : proposition.montant_mise_precedent;
+  const infoType = infoTypeContrat(typeContrat);
+  const estJournalier = typeContrat === 'journalier';
+
+  ouvrirModal(`
+    <h2>Nouveau contrat (reconduction) — ${proposition.membre_nom}</h2>
+    <p class="subtitle-sm">Type de contrat reconduit : <b>${infoType.label}</b>. Ceci crée réellement le nouveau contrat au moment de l'encaissement.</p>
+    <form id="form-finaliser-reconduction">
+      <div class="field-row">
+        <label>Montant du ${infoType.labelVersement} (GNF)</label>
+        <input type="number" name="montantPeriode" min="1" value="${montantPeriodeSuggere || ''}" required />
+      </div>
+      <div class="field-row" id="champ-commission-fr" style="${estJournalier ? '' : 'display:none;'}">
+        <label>Commission encaissée aujourd'hui (jour 1, GNF)</label>
+        <input type="number" name="commission" min="1" ${estJournalier ? 'required' : ''} />
+      </div>
+      <div class="field-row" id="champ-frais-inscription-fr" style="${estJournalier ? 'display:none;' : ''}">
+        <label>Frais d'inscription (GNF)</label>
+        <input type="number" name="fraisInscription" min="0" />
+      </div>
+      <div class="modal-actions">
+        <button type="button" class="secondary" id="modal-annuler-reconduction" style="flex:1;">Annuler</button>
+        <button type="submit" style="flex:1;">Créer le contrat</button>
+      </div>
+    </form>
+  `);
+  document.getElementById('modal-annuler-reconduction').addEventListener('click', fermerModal);
+  document.getElementById('form-finaliser-reconduction').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    const montantPeriode = Number(fd.get('montantPeriode'));
+    const commission = Number(fd.get('commission') || 0);
+    const fraisInscription = Number(fd.get('fraisInscription') || 0);
+
+    try {
+      const contratRef = await creerContratEtPremierePeriode({
+        membreId: proposition.membre_id,
+        membreNom: proposition.membre_nom,
+        typeContrat,
+        montantPeriode,
+        commission,
+        fraisInscription,
+      });
+
+      await updateDoc(doc(db, 'propositions_reconduction', proposition.id), {
+        statut: 'traite',
+        nouveau_contrat_id: contratRef.id,
+        date_traitement: serverTimestamp(),
+      });
+
+      notifier('Nouveau contrat créé et proposition finalisée.', 'succes');
+      fermerModal();
+    } catch (err) {
+      console.error(err);
+      notifier('Erreur : ' + err.message, 'erreur');
+    }
+  });
+}
+
 async function confirmerRetraitMembre(demande) {
   try {
     if (demande.type === 'solde_contrat_termine' && demande.contractId) {
@@ -574,6 +713,20 @@ async function confirmerRetraitMembre(demande) {
       await updateDoc(doc(db, 'contracts', demande.contractId), {
         statut: 'cloture',
         epargne_soldee: true,
+      });
+      // --- NOUVEAU (2 sept 2026) : création de la proposition de reconduction ---
+      // Manquait jusqu'ici — sans ce document, le membre ne voyait jamais la
+      // proposition "voulez-vous reconduire ?" et aucun renouvellement n'était possible.
+      const contratCloture = state.contracts.find((c) => c.id === demande.contractId);
+      await addDoc(collection(db, 'propositions_reconduction'), {
+        membre_id: demande.memberId,
+        membre_nom: demande.memberName || (contratCloture ? contratCloture.membre_nom : ''),
+        collecteur_id: state.currentCollecteurData.uid,
+        contrat_precedent_id: demande.contractId,
+        type_contrat_precedent: contratCloture ? (contratCloture.type_contrat || 'journalier') : 'journalier',
+        montant_mise_precedent: contratCloture ? contratCloture.montant_mise : null,
+        statut: 'en_attente',
+        date: serverTimestamp(),
       });
     } else if (demande.type === 'pret') {
       const contratOrigine = state.contracts.find((c) => c.id === demande.contractId);
