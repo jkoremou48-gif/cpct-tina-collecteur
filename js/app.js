@@ -74,6 +74,15 @@ function genererMotDePasseMembre(telephone) {
   return chiffres.slice(-6);
 }
 
+// ==========================================================
+// --- CORRECTIF (3 sept 2026) : suppression de compte définitive ---
+// Un collecteur marqué "supprime" ou "licencie" par le PDG (statut sur son
+// document users/{uid}) ne doit plus jamais pouvoir accéder au dashboard,
+// même si son compte Firebase Authentication reste techniquement valide
+// (impossible à supprimer réellement sans Cloud Functions/plan payant).
+// On bloque donc l'accès ici, à chaque connexion ET à chaque rechargement
+// de l'app tant qu'une session existe.
+// ==========================================================
 function demarrer() {
   showOnly(loading);
   onAuthStateChanged(auth, async (user) => {
@@ -81,8 +90,15 @@ function demarrer() {
     if (user) {
       const userSnap = await getDoc(doc(db, 'users', user.uid));
       if (userSnap.exists() && userSnap.data().role === 'collecteur') {
+        const donneesCollecteur = userSnap.data();
+        if (donneesCollecteur.statut === 'supprime' || donneesCollecteur.statut === 'licencie') {
+          await signOut(auth);
+          showOnly(loginScreen);
+          loginError.textContent = "Ce compte a été supprimé ou n'est plus actif. Contactez votre PDG.";
+          return;
+        }
         state.currentUser = user;
-        state.currentCollecteurData = { uid: user.uid, ...userSnap.data() };
+        state.currentCollecteurData = { uid: user.uid, ...donneesCollecteur };
         lancerDashboard();
         return;
       } else {
