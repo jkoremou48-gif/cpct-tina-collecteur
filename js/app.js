@@ -655,6 +655,10 @@ function renderReconductionsATraiter() {
   });
 }
 
+// === CORRECTIF : le champ "commission" séparé a été supprimé. Pour un
+// contrat journalier, le jour 1 est désormais TOUJOURS égal au montant du
+// versement choisi — prélevé automatiquement, sans saisie manuelle
+// distincte (source du bug de commission manquante lors des reconductions).
 function ouvrirFinalisationReconduction(propositionId) {
   const proposition = state.propositionsReconduction.find((p) => p.id === propositionId);
   if (!proposition) return;
@@ -668,15 +672,12 @@ function ouvrirFinalisationReconduction(propositionId) {
 
   ouvrirModal(`
     <h2>Nouveau contrat (reconduction) — ${proposition.membre_nom}</h2>
-    <p class="subtitle-sm">Type de contrat reconduit : <b>${infoType.label}</b>. Ceci crée réellement le nouveau contrat au moment de l'encaissement.</p>
+    <p class="subtitle-sm">Type de contrat reconduit : <b>${infoType.label}</b>. Ceci crée réellement le nouveau contrat au moment de l'encaissement.
+    ${estJournalier ? " Le 1er versement (jour 1) est automatiquement prélevé comme commission (frais d'entretien du compte), quel que soit le montant journalier choisi ci-dessous." : ""}</p>
     <form id="form-finaliser-reconduction">
       <div class="field-row">
         <label>Montant du ${infoType.labelVersement} (GNF)</label>
         <input type="number" name="montantPeriode" min="1" value="${montantPeriodeSuggere || ''}" required />
-      </div>
-      <div class="field-row" id="champ-commission-fr" style="${estJournalier ? '' : 'display:none;'}">
-        <label>Commission encaissée aujourd'hui (jour 1, GNF)</label>
-        <input type="number" name="commission" min="1" ${estJournalier ? 'required' : ''} />
       </div>
       <div class="field-row" id="champ-frais-inscription-fr" style="${estJournalier ? 'display:none;' : ''}">
         <label>Frais d'inscription (GNF)</label>
@@ -693,7 +694,6 @@ function ouvrirFinalisationReconduction(propositionId) {
     e.preventDefault();
     const fd = new FormData(e.target);
     const montantPeriode = Number(fd.get('montantPeriode'));
-    const commission = Number(fd.get('commission') || 0);
     const fraisInscription = Number(fd.get('fraisInscription') || 0);
 
     try {
@@ -702,7 +702,6 @@ function ouvrirFinalisationReconduction(propositionId) {
         membreNom: proposition.membre_nom,
         typeContrat,
         montantPeriode,
-        commission,
         fraisInscription,
       });
 
@@ -1115,10 +1114,12 @@ async function enregistrerVersement(contrat, montantSaisi, periodeDepart, period
   }
 }
 
+// === CORRECTIF : signature réduite à (typeContrat, labelMontantId, champFraisId) —
+// le champ "commission" séparé n'existe plus nulle part dans l'app.
 function ouvrirNouveauContrat(membreId, membreNom) {
   ouvrirModal(`
     <h2>Nouveau contrat — ${membreNom}</h2>
-    <p class="subtitle-sm">Choisissez le type de contrat et démarrez-le.</p>
+    <p class="subtitle-sm">Choisissez le type de contrat et démarrez-le. Pour un contrat journalier, le 1er versement (jour 1) est automatiquement prélevé comme commission (frais d'entretien du compte) — pas de saisie séparée.</p>
     <form id="form-nouveau-contrat">
       <div class="field-row">
         <label>Type de contrat</label>
@@ -1132,10 +1133,6 @@ function ouvrirNouveauContrat(membreId, membreNom) {
         <label id="label-montant-periode-nc">Montant du versement quotidien (GNF)</label>
         <input type="number" name="montantPeriode" min="1" required />
       </div>
-      <div class="field-row" id="champ-commission-nc">
-        <label>Commission encaissée aujourd'hui (jour 1, GNF)</label>
-        <input type="number" name="commission" min="1" />
-      </div>
       <div class="field-row hidden" id="champ-frais-inscription-nc">
         <label>Frais d'inscription (GNF)</label>
         <input type="number" name="fraisInscription" min="0" />
@@ -1147,7 +1144,7 @@ function ouvrirNouveauContrat(membreId, membreNom) {
     </form>
   `);
   document.getElementById('select-type-contrat-nc').addEventListener('change', (e) => {
-    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nc', 'champ-commission-nc', 'champ-frais-inscription-nc');
+    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nc', 'champ-frais-inscription-nc');
   });
   document.getElementById('modal-annuler-nouveau-contrat').addEventListener('click', fermerModal);
   document.getElementById('form-nouveau-contrat').addEventListener('submit', async (e) => {
@@ -1155,7 +1152,6 @@ function ouvrirNouveauContrat(membreId, membreNom) {
     const fd = new FormData(e.target);
     const typeContrat = fd.get('typeContrat');
     const montantPeriode = Number(fd.get('montantPeriode'));
-    const commission = Number(fd.get('commission') || 0);
     const fraisInscription = Number(fd.get('fraisInscription') || 0);
 
     try {
@@ -1164,7 +1160,6 @@ function ouvrirNouveauContrat(membreId, membreNom) {
         membreNom,
         typeContrat,
         montantPeriode,
-        commission,
         fraisInscription,
       });
       notifier('Nouveau contrat créé.', 'succes');
@@ -1176,30 +1171,26 @@ function ouvrirNouveauContrat(membreId, membreNom) {
   });
 }
 
-// Bascule l'affichage des champs "commission jour 1" (journalier) vs
-// "frais d'inscription" (hebdo/mensuel) selon le type choisi.
-function basculerChampsTypeContrat(typeContrat, labelMontantId, champCommissionId, champFraisId) {
+// === CORRECTIF : ne gère plus que le champ "frais d'inscription" (hebdo/mensuel).
+// Le champ "commission" séparé (journalier) a été supprimé partout.
+function basculerChampsTypeContrat(typeContrat, labelMontantId, champFraisId) {
   const infoType = infoTypeContrat(typeContrat);
   document.getElementById(labelMontantId).textContent = `Montant du ${infoType.labelVersement} (GNF)`;
-  const champCommission = document.getElementById(champCommissionId);
   const champFrais = document.getElementById(champFraisId);
   if (typeContrat === 'journalier') {
-    champCommission.classList.remove('hidden');
     champFrais.classList.add('hidden');
-    champCommission.querySelector('input').required = true;
     champFrais.querySelector('input').required = false;
   } else {
-    champCommission.classList.add('hidden');
     champFrais.classList.remove('hidden');
-    champCommission.querySelector('input').required = false;
     champFrais.querySelector('input').required = false;
   }
 }
 
-// Crée le contrat + (journalier : versement jour 1 = commission) OU
-// (hebdo/mensuel : document frais_inscription séparé, réparti selon
-// les % réglés par le PDG dans parametres/interets_types_annuels).
-async function creerContratEtPremierePeriode({ membreId, membreNom, typeContrat, montantPeriode, commission, fraisInscription }) {
+// === CORRECTIF : suppression du paramètre "commission" — pour un contrat
+// journalier, la commission du jour 1 = automatiquement le montant de la
+// cotisation journalière choisie (montantPeriode), plus aucune saisie
+// manuelle séparée possible.
+async function creerContratEtPremierePeriode({ membreId, membreNom, typeContrat, montantPeriode, fraisInscription }) {
   const infoType = infoTypeContrat(typeContrat);
   const contratData = {
     membre_id: membreId,
@@ -1212,7 +1203,7 @@ async function creerContratEtPremierePeriode({ membreId, membreNom, typeContrat,
     date_debut: new Date().toISOString(),
   };
   if (typeContrat === 'journalier') {
-    contratData.commission = commission;
+    contratData.commission = montantPeriode;
   } else {
     contratData.frais_inscription = fraisInscription;
   }
@@ -1224,7 +1215,7 @@ async function creerContratEtPremierePeriode({ membreId, membreNom, typeContrat,
       contract_id: contratRef.id,
       collecteur_id: state.currentCollecteurData.uid,
       membre_id: membreId,
-      montant: commission,
+      montant: montantPeriode,
       jour_numero: 1,
       statut: 'collecte',
       date: serverTimestamp(),
@@ -1380,10 +1371,11 @@ async function enregistrerCompensationDepenses(depensesNonCompensees, montantVer
   }
 }
 
+// === CORRECTIF : champ "commission" séparé supprimé du formulaire nouveau membre.
 document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
   ouvrirModal(`
     <h2>Nouveau membre</h2>
-    <p class="subtitle-sm">Créez le compte du membre, choisissez son type de contrat et enregistrez sa 1ère opération. Un mot de passe est généré automatiquement à partir de son numéro de téléphone.</p>
+    <p class="subtitle-sm">Créez le compte du membre, choisissez son type de contrat et enregistrez sa 1ère opération. Un mot de passe est généré automatiquement à partir de son numéro de téléphone. Pour un contrat journalier, le 1er versement (jour 1) est automatiquement prélevé comme commission.</p>
       <form id="form-nouveau-membre">
         <div class="field-row">
           <label>Nom et prénom du membre</label>
@@ -1413,10 +1405,6 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
           <label id="label-montant-periode-nm">Montant du versement quotidien (GNF)</label>
           <input type="number" name="montantPeriode" min="1" required />
         </div>
-        <div class="field-row" id="champ-commission-nm">
-          <label>Commission encaissée aujourd'hui (jour 1, GNF)</label>
-          <input type="number" name="commission" min="1" />
-        </div>
         <div class="field-row hidden" id="champ-frais-inscription-nm">
           <label>Frais d'inscription (GNF)</label>
           <input type="number" name="fraisInscription" min="0" />
@@ -1428,7 +1416,7 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
       </form>
   `);
   document.getElementById('select-type-contrat-nm').addEventListener('change', (e) => {
-    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nm', 'champ-commission-nm', 'champ-frais-inscription-nm');
+    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nm', 'champ-frais-inscription-nm');
   });
   document.getElementById('modal-annuler-membre').addEventListener('click', fermerModal);
   document.getElementById('form-nouveau-membre').addEventListener('submit', async (e) => {
@@ -1441,7 +1429,6 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
     const password = genererMotDePasseMembre(telephone);
     const typeContrat = fd.get('typeContrat');
     const montantPeriode = Number(fd.get('montantPeriode'));
-    const commission = Number(fd.get('commission') || 0);
     const fraisInscription = Number(fd.get('fraisInscription') || 0);
 
     try {
@@ -1461,7 +1448,6 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
         membreNom: nom,
         typeContrat,
         montantPeriode,
-        commission,
         fraisInscription,
       });
 
