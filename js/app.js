@@ -1,3 +1,4 @@
+// === COLLECTEUR — PARTIE 1/2 ===
 // ==========================
 // CPCT-TINA — App Collecteur
 // ==========================
@@ -14,11 +15,11 @@ import {
   calculerStatutContrat, TYPES_CONTRAT, infoTypeContrat, calculerMontantDuPretGeneralise,
 } from "./utils.js";
 
-const TAUX_COMMISSION = 0.30; // journalier uniquement (jour 1)
-const PART_INTERET_COLLECTEUR = 0.30; // journalier uniquement
-const PART_INTERET_PDG = 0.70; // journalier uniquement
-const TAUX_HEBDO_PRET = 0.02; // journalier uniquement
-const TAUX_MENSUEL_PRET_DEFAUT = 0.08; // hebdo/mensuel, si le PDG n'a rien réglé
+const TAUX_COMMISSION = 0.30;
+const PART_INTERET_COLLECTEUR = 0.30;
+const PART_INTERET_PDG = 0.70;
+const TAUX_HEBDO_PRET = 0.02;
+const TAUX_MENSUEL_PRET_DEFAUT = 0.08;
 const AVATAR_DEFAUT = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='56' height='56'><rect width='56' height='56' fill='%23ddd'/></svg>";
 
 const state = {
@@ -38,8 +39,9 @@ const state = {
   depenses: [],
   redistributions: [],
   parametresInterets: { pdg: 0.70, collecteur: 0.30, redistribution: 0 },
-  // --- NOUVEAU (2 sept 2026) : reconductions de contrat à finaliser ---
   propositionsReconduction: [],
+  // --- NOUVEAU (13 sept 2026) : propositions de nouveau contrat superposable ---
+  propositionsNouveauContrat: [],
   unsubscribers: [],
 };
 let creationEnCours = false;
@@ -74,15 +76,6 @@ function genererMotDePasseMembre(telephone) {
   return chiffres.slice(-6);
 }
 
-// ==========================================================
-// --- CORRECTIF (3 sept 2026) : suppression de compte définitive ---
-// Un collecteur marqué "supprime" ou "licencie" par le PDG (statut sur son
-// document users/{uid}) ne doit plus jamais pouvoir accéder au dashboard,
-// même si son compte Firebase Authentication reste techniquement valide
-// (impossible à supprimer réellement sans Cloud Functions/plan payant).
-// On bloque donc l'accès ici, à chaque connexion ET à chaque rechargement
-// de l'app tant qu'une session existe.
-// ==========================================================
 function demarrer() {
   showOnly(loading);
   onAuthStateChanged(auth, async (user) => {
@@ -354,7 +347,6 @@ function lancerDashboard() {
       renderAll();
     }
   );
-  // --- NOUVEAU (25 août 2026) : types de contrats ---
   const unsubFraisInscription = onSnapshot(
     query(collection(db, 'frais_inscription'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
     (snap) => {
@@ -387,7 +379,6 @@ function lancerDashboard() {
     }
     renderAll();
   });
-  // --- NOUVEAU (2 sept 2026) : reconductions de contrat à finaliser ---
   const unsubPropositions = onSnapshot(
     query(collection(db, 'propositions_reconduction'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
     (snap) => {
@@ -395,11 +386,20 @@ function lancerDashboard() {
       renderAll();
     }
   );
+  // --- NOUVEAU (13 sept 2026) : propositions de nouveau contrat superposable ---
+  const unsubPropositionsNouveauContrat = onSnapshot(
+    query(collection(db, 'propositions_nouveau_contrat'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.propositionsNouveauContrat = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
 
   state.unsubscribers.push(
     unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements,
     unsubRetraits, unsubInterets, unsubRetraitsCommission, unsubDiffusions, unsubMesMessages,
-    unsubFraisInscription, unsubDepenses, unsubRedistributions, unsubParametres, unsubPropositions
+    unsubFraisInscription, unsubDepenses, unsubRedistributions, unsubParametres, unsubPropositions,
+    unsubPropositionsNouveauContrat
   );
 }
 
@@ -411,8 +411,6 @@ function renderAll() {
   renderMembersList();
 }
 
-// --- Correctif (23 août 2026) : le solde du membre compte tout versement
-// NON ANNULÉ, immédiatement, sans attendre le verrouillage/confirmation du PDG.
 function renderCollecteurHeader() {
   document.getElementById('collectorName').textContent = state.currentCollecteurData.nom || 'Collecteur';
 
@@ -433,7 +431,6 @@ function renderCollecteurHeader() {
   const totalCommissionConfirmee = commissionsConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
   const commissionInscriptions = totalCommissionConfirmee * TAUX_COMMISSION;
 
-  // Frais d'inscription hebdo/mensuel (part collecteur), déjà calculée à la création
   const fraisInscriptionCollecteur = state.fraisInscriptions.reduce((s, f) => s + Number(f.montant_collecteur || 0), 0);
 
   const commissionInterets = state.interetsPartages.reduce((s, i) => s + Number(i.montant_collecteur || 0), 0);
@@ -593,15 +590,6 @@ function renderRetraitsMembres() {
     });
 }
 
-// ==========================================================
-// --- NOUVEAU (2 sept 2026) : reconductions de contrat à finaliser ---
-// Après un retrait_final confirmé (Cas 4, clôture), une proposition de
-// reconduction est créée pour le membre. Une fois qu'il a répondu
-// ("reconduit_meme_termes" ou "reconduit_modifie"), elle apparaît ici pour
-// que le collecteur crée réellement le nouveau contrat + le versement jour 1
-// au moment où il encaisse la 1ère cotisation en personne.
-// ==========================================================
-
 function renderReconductionsATraiter() {
   const enAttenteTraitement = state.propositionsReconduction.filter(
     (p) => p.statut === 'reconduit_meme_termes' || p.statut === 'reconduit_modifie'
@@ -655,10 +643,6 @@ function renderReconductionsATraiter() {
   });
 }
 
-// === CORRECTIF : le champ "commission" séparé a été supprimé. Pour un
-// contrat journalier, le jour 1 est désormais TOUJOURS égal au montant du
-// versement choisi — prélevé automatiquement, sans saisie manuelle
-// distincte (source du bug de commission manquante lors des reconductions).
 function ouvrirFinalisationReconduction(propositionId) {
   const proposition = state.propositionsReconduction.find((p) => p.id === propositionId);
   if (!proposition) return;
@@ -729,9 +713,6 @@ async function confirmerRetraitMembre(demande) {
         statut: 'cloture',
         epargne_soldee: true,
       });
-      // --- NOUVEAU (2 sept 2026) : création de la proposition de reconduction ---
-      // Manquait jusqu'ici — sans ce document, le membre ne voyait jamais la
-      // proposition "voulez-vous reconduire ?" et aucun renouvellement n'était possible.
       const contratCloture = state.contracts.find((c) => c.id === demande.contractId);
       await addDoc(collection(db, 'propositions_reconduction'), {
         membre_id: demande.memberId,
@@ -882,16 +863,6 @@ document.getElementById('form-message-pdg').addEventListener('submit', async (e)
   }
 });
 
-// ==========================================================
-// --- NOUVEAU (25 août 2026) : calculs généralisés par type de contrat ---
-// Journalier : jour_numero === 1 est la commission (exclue de l'épargne nette).
-// Hebdomadaire / Mensuel : pas de "jour 1 = frais" — tous les versements
-// périodiques comptent en épargne nette ; le frais d'inscription est un
-// document séparé (collection frais_inscription), pas un versement.
-// Les dépenses non compensées diminuent l'épargne nette ; les redistributions
-// reçues l'augmentent.
-// ==========================================================
-
 function calculerEpargneNetteContrat(contrat) {
   const typeContrat = contrat.type_contrat || 'journalier';
   const versements = state.payments.filter((p) => p.contract_id === contrat.id && p.statut !== 'annule');
@@ -936,6 +907,15 @@ function trouverContratsNonSoldes(membreId, contratExclureId) {
     !c.epargne_soldee
   );
 }
+// === FIN COLLECTEUR — PARTIE 1/2 ===
+// === COLLECTEUR — PARTIE 2/2 ===
+// ==========================================================
+// --- MODIFIÉ (13 sept 2026) : liste des membres — un membre peut désormais
+// avoir plusieurs contrats actifs superposés. On affiche une ligne par
+// contrat actif (avec ses propres boutons Encaisser + Nouveau contrat), et
+// une ligne par membre sans contrat actif (son dernier contrat clôturé,
+// avec seulement le bouton Nouveau contrat).
+// ==========================================================
 
 function renderMembersList() {
   const container = document.getElementById('membersList');
@@ -943,16 +923,21 @@ function renderMembersList() {
 
   const versementsConfirmesTous = state.payments.filter((p) => p.statut !== 'annule');
 
-  const contratsParMembre = {};
+  const contratsActifsTous = state.contracts.filter((c) => c.statut === 'actif');
+  const membresAvecActif = new Set(contratsActifsTous.map((c) => c.membre_id));
+
+  const dernierClotureParMembre = {};
   state.contracts
-    .filter((c) => c.statut === 'actif' || c.statut === 'cloture')
+    .filter((c) => c.statut === 'cloture' && !membresAvecActif.has(c.membre_id))
     .forEach((c) => {
-      const existant = contratsParMembre[c.membre_id];
+      const existant = dernierClotureParMembre[c.membre_id];
       if (!existant || (c.date_debut || '') > (existant.date_debut || '')) {
-        contratsParMembre[c.membre_id] = c;
+        dernierClotureParMembre[c.membre_id] = c;
       }
     });
-  const contratsAffiches = Object.values(contratsParMembre);
+
+  const contratsAffiches = [...contratsActifsTous, ...Object.values(dernierClotureParMembre)]
+    .sort((a, b) => (a.membre_nom || '').localeCompare(b.membre_nom || '', 'fr'));
 
   if (contratsAffiches.length === 0) {
     container.innerHTML = '<p style="color:#999;">Aucun membre assigné.</p>';
@@ -980,6 +965,13 @@ function renderMembersList() {
     const depensesNonCompensees = state.depenses.filter((d) => d.contract_id === contrat.id && !d.compensee);
     const totalDepensesNonCompensees = depensesNonCompensees.reduce((s, d) => s + Number(d.montant || 0), 0);
 
+    // --- NOUVEAU (13 sept 2026) : état d'une proposition de nouveau contrat pour ce membre ---
+    const propositionsMembre = state.propositionsNouveauContrat.filter((p) => p.membre_id === contrat.membre_id);
+    const propositionEnAttente = propositionsMembre.find((p) => p.statut === 'en_attente');
+    const propositionRefusee = propositionsMembre
+      .filter((p) => p.statut === 'refuse')
+      .sort((a, b) => (b.date_reponse?.toMillis?.() || 0) - (a.date_reponse?.toMillis?.() || 0))[0];
+
     const row = document.createElement('div');
     row.className = 'member-row';
     row.innerHTML = `
@@ -990,15 +982,15 @@ function renderMembersList() {
         ${pret ? `<br><small style="color:#c0392b;">Prêt en cours : ${formatGNF(calculerMontantDuPret(pret))} · Solde disponible : ${formatGNF(soldeDisponible)}</small>` : ''}
         ${totalNonSolde > 0 ? `<br><small style="color:#c0392b; font-weight:bold;">Contrat non soldé : ${formatGNF(totalNonSolde)}</small>` : ''}
         ${totalDepensesNonCompensees > 0 ? `<br><small style="color:#e67e22; font-weight:bold;">Dépenses non compensées : ${formatGNF(totalDepensesNonCompensees)}</small>` : ''}
+        ${propositionEnAttente ? `<br><small style="color:#e67e22;">Nouveau contrat proposé (${infoTypeContrat(propositionEnAttente.type_contrat || 'journalier').label}) — en attente de confirmation du membre</small>` : ''}
+        ${!propositionEnAttente && propositionRefusee ? `<br><small style="color:#c0392b;">Dernière proposition de nouveau contrat refusée par le membre</small>` : ''}
       </div>
       <div style="text-align:right;">
         <span class="badge ${statut.classe}">${statut.texte}</span><br>
-        ${estCloture
-          ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#198754;"
-              data-nouveau-contrat="${contrat.membre_id}" data-nom="${contrat.membre_nom || 'Membre'}">Nouveau contrat</button>`
-          : `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px;"
-              data-contrat="${contrat.id}">Encaisser</button>`
-        }
+        ${!estCloture ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px;"
+              data-contrat="${contrat.id}">Encaisser</button>` : ''}
+        <button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#198754;"
+              data-nouveau-contrat="${contrat.membre_id}" data-nom="${contrat.membre_nom || 'Membre'}">Nouveau contrat</button>
         ${pret ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#c0392b;"
           data-pret="${pret.id}">Rembourser prêt</button>` : ''}
         ${(typeContrat === 'hebdomadaire' || typeContrat === 'mensuel') && !estCloture ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#e67e22;"
@@ -1114,12 +1106,16 @@ async function enregistrerVersement(contrat, montantSaisi, periodeDepart, period
   }
 }
 
-// === CORRECTIF : signature réduite à (typeContrat, labelMontantId, champFraisId) —
-// le champ "commission" séparé n'existe plus nulle part dans l'app.
+// ==========================================================
+// --- MODIFIÉ (13 sept 2026) : "Nouveau contrat" envoie désormais une
+// PROPOSITION que le membre doit confirmer ou rejeter, au lieu de créer le
+// contrat directement. Le contrat s'ajoute à ceux déjà en cours du membre
+// (superposition) une fois confirmé par le membre.
+// ==========================================================
 function ouvrirNouveauContrat(membreId, membreNom) {
   ouvrirModal(`
     <h2>Nouveau contrat — ${membreNom}</h2>
-    <p class="subtitle-sm">Choisissez le type de contrat et démarrez-le. Pour un contrat journalier, le 1er versement (jour 1) est automatiquement prélevé comme commission (frais d'entretien du compte) — pas de saisie séparée.</p>
+    <p class="subtitle-sm">Ce contrat s'ajoutera aux contrats déjà en cours de ce membre (superposition) une fois qu'il l'aura <b>confirmé</b>. Il peut aussi le <b>rejeter</b>. Pour un contrat journalier, le 1er versement (jour 1) sera automatiquement prélevé comme commission.</p>
     <form id="form-nouveau-contrat">
       <div class="field-row">
         <label>Type de contrat</label>
@@ -1139,7 +1135,7 @@ function ouvrirNouveauContrat(membreId, membreNom) {
       </div>
       <div class="modal-actions">
         <button type="button" class="secondary" id="modal-annuler-nouveau-contrat" style="flex:1;">Annuler</button>
-        <button type="submit" style="flex:1;">Créer le contrat</button>
+        <button type="submit" style="flex:1;">Envoyer la proposition au membre</button>
       </div>
     </form>
   `);
@@ -1155,14 +1151,17 @@ function ouvrirNouveauContrat(membreId, membreNom) {
     const fraisInscription = Number(fd.get('fraisInscription') || 0);
 
     try {
-      await creerContratEtPremierePeriode({
-        membreId,
-        membreNom,
-        typeContrat,
-        montantPeriode,
-        fraisInscription,
+      await addDoc(collection(db, 'propositions_nouveau_contrat'), {
+        membre_id: membreId,
+        membre_nom: membreNom,
+        collecteur_id: state.currentCollecteurData.uid,
+        type_contrat: typeContrat,
+        montant_periode: montantPeriode,
+        frais_inscription: fraisInscription,
+        statut: 'en_attente',
+        date: serverTimestamp(),
       });
-      notifier('Nouveau contrat créé.', 'succes');
+      notifier('Proposition de nouveau contrat envoyée au membre.', 'succes');
       fermerModal();
     } catch (err) {
       console.error(err);
@@ -1171,8 +1170,6 @@ function ouvrirNouveauContrat(membreId, membreNom) {
   });
 }
 
-// === CORRECTIF : ne gère plus que le champ "frais d'inscription" (hebdo/mensuel).
-// Le champ "commission" séparé (journalier) a été supprimé partout.
 function basculerChampsTypeContrat(typeContrat, labelMontantId, champFraisId) {
   const infoType = infoTypeContrat(typeContrat);
   document.getElementById(labelMontantId).textContent = `Montant du ${infoType.labelVersement} (GNF)`;
@@ -1186,10 +1183,6 @@ function basculerChampsTypeContrat(typeContrat, labelMontantId, champFraisId) {
   }
 }
 
-// === CORRECTIF : suppression du paramètre "commission" — pour un contrat
-// journalier, la commission du jour 1 = automatiquement le montant de la
-// cotisation journalière choisie (montantPeriode), plus aucune saisie
-// manuelle séparée possible.
 async function creerContratEtPremierePeriode({ membreId, membreNom, typeContrat, montantPeriode, fraisInscription }) {
   const infoType = infoTypeContrat(typeContrat);
   const contratData = {
@@ -1236,10 +1229,6 @@ async function creerContratEtPremierePeriode({ membreId, membreNom, typeContrat,
 
   return contratRef;
 }
-
-// ==========================================================
-// --- NOUVEAU (25 août 2026) : gestion des dépenses (hebdo/mensuel) ---
-// ==========================================================
 
 function ouvrirNouvelleDepense(contrat) {
   ouvrirModal(`
@@ -1328,10 +1317,6 @@ function ouvrirCompensationDepenses(contrat, totalNonCompense, depensesNonCompen
   });
 }
 
-// Compense les dépenses les plus anciennes en premier, jusqu'à épuisement
-// du montant versé. Une dépense partiellement compensée reste non compensée
-// pour son reliquat (nouvelle ligne de dépense pour le reliquat, l'originale
-// passe compensee=true pour la part couverte).
 async function enregistrerCompensationDepenses(depensesNonCompensees, montantVerse) {
   let restant = montantVerse;
   const triees = [...depensesNonCompensees].sort((a, b) => (a.date_depense || '').localeCompare(b.date_depense || ''));
@@ -1347,8 +1332,6 @@ async function enregistrerCompensationDepenses(depensesNonCompensees, montantVer
       });
       restant -= montantDepense;
     } else {
-      // Compensation partielle : on clôture la ligne d'origine pour la part
-      // couverte et on recrée une ligne pour le reliquat non compensé.
       await updateDoc(doc(db, 'depenses', d.id), {
         compensee: true,
         date_compensation: serverTimestamp(),
@@ -1371,7 +1354,6 @@ async function enregistrerCompensationDepenses(depensesNonCompensees, montantVer
   }
 }
 
-// === CORRECTIF : champ "commission" séparé supprimé du formulaire nouveau membre.
 document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
   ouvrirModal(`
     <h2>Nouveau membre</h2>
@@ -1518,7 +1500,6 @@ function afficherIdentifiants(data) {
   carte.querySelector('#fermer-identifiants').addEventListener('click', () => overlay.remove());
 }
 
-// --- Correctif (23 août 2026) : versement comptabilisé = tout ce qui n'est pas annulé.
 async function afficherDetailsMembre(contrat) {
   const typeContrat = contrat.type_contrat || 'journalier';
   const infoType = infoTypeContrat(typeContrat);
@@ -1587,15 +1568,6 @@ function ouvrirRemboursementPret(pretId) {
   }
   enregistrerRemboursement(pret, montantNum, montantDu);
 }
-
-// ==========================================================
-// --- NOUVEAU (25 août 2026) : répartition d'intérêt généralisée ---
-// Journalier : 70% PDG / 30% collecteur (fixe, historique).
-// Hebdomadaire / Mensuel : %PDG / %collecteur / %redistribution réglés
-// par le PDG (state.parametresInterets). La part "redistribution" est
-// répartie immédiatement entre les membres à contrat annuel actif DU MÊME
-// COLLECTEUR, au prorata de leur cotisation périodique.
-// ==========================================================
 
 async function enregistrerRemboursement(pret, montant, montantDuAvant) {
   try {
@@ -1672,9 +1644,6 @@ async function enregistrerRemboursement(pret, montant, montantDuAvant) {
   }
 }
 
-// Répartit un montant entre les membres à contrat hebdo/mensuel actif DU MÊME
-// COLLECTEUR que le prêt d'origine (pas tous les collecteurs de l'entreprise),
-// au prorata de leur cotisation périodique.
 async function redistribuerAuxMembresAnnuels(pretOrigine, montantARepartir) {
   const beneficiaires = state.contracts.filter((c) =>
     c.statut === 'actif' &&
@@ -1718,3 +1687,4 @@ document.getElementById('modal-overlay').addEventListener('click', (e) => {
 });
 
 demarrer();
+// === FIN COLLECTEUR — PARTIE 2/2 ===
