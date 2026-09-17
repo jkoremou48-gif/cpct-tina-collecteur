@@ -29,6 +29,7 @@ const state = {
   payments: [],
   versements: [],
   withdrawalRequests: [],
+  retraitsConfirmesMembres: [],
   prets: [],
   remboursements: [],
   interetsPartages: [],
@@ -315,6 +316,19 @@ function lancerDashboard() {
       renderAll();
     }
   );
+  // --- NOUVEAU (16 sept 2026) : retraits/prêts CONFIRMÉS des membres,
+  // nécessaires au calcul du solde total d'épargne net et à l'historique. ---
+  const unsubRetraitsConfirmesMembres = onSnapshot(
+    query(
+      collection(db, 'withdrawalRequests'),
+      where('collecteur_id', '==', state.currentCollecteurData.uid),
+      where('statut', '==', 'confirme')
+    ),
+    (snap) => {
+      state.retraitsConfirmesMembres = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    }
+  );
   const unsubInterets = onSnapshot(
     query(collection(db, 'interets_prets_repartis'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
     (snap) => {
@@ -396,7 +410,7 @@ function lancerDashboard() {
 
   state.unsubscribers.push(
     unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements,
-    unsubRetraits, unsubInterets, unsubRetraitsCommission, unsubDiffusions, unsubMesMessages,
+    unsubRetraits, unsubRetraitsConfirmesMembres, unsubInterets, unsubRetraitsCommission, unsubDiffusions, unsubMesMessages,
     unsubFraisInscription, unsubDepenses, unsubRedistributions, unsubParametres, unsubPropositions,
     unsubPropositionsNouveauContrat
   );
@@ -410,91 +424,214 @@ function renderAll() {
   renderMembersList();
 }
 
+// ==========================================================
+// --- MODIFIÉ (16 sept 2026) : tableau de bord simplifié à 5 soldes.
+// 1) Solde total d'épargne net = tous les versements - commission
+//    journalière (100%, jour 1) - retraits confirmés des membres.
+// 2) Commission collecteur (30%) et 3) Commission totale (100%) : calculées
+//    uniquement sur les contrats CRÉÉS ce mois-ci.
+// 4) Total collecté = 1 + 3.
+// 5) Épargne nette par type de contrat.
+// En haut du tableau de bord : nombre de contrats actifs/inactifs (réutilise
+// la ligne "collectorStats" déjà présente). Un bouton "HISTORIQUE DES
+// RETRAIT" liste les retraits/prêts confirmés des membres.
+// ==========================================================
+
 function renderCollecteurHeader() {
   document.getElementById('collectorName').textContent = state.currentCollecteurData.nom || 'Collecteur';
 
-  const TC = state.payments.reduce((s, p) => s + Number(p.montant || 0), 0);
-  const TV = state.versements.reduce((s, v) => s + Number(v.montant || 0), 0);
+  // --- a) Nombre de contrats actifs / inactifs, en haut du tableau de bord ---
+  const versementsConfirmesTousPourStatut = state.payments.filter((p) => p.statut !== 'annule');
+  const contratsActifsStatut = state.contracts.filter((c) => c.statut === 'actif');
+  let nbActifs = 0;
+  let nbInactifs = 0;
+  contratsActifsStatut.forEach((c) => {
+    const statutCalc = calculerStatutContrat(c, versementsConfirmesTousPourStatut);
+    if (statutCalc === 'inactif') { nbInactifs++; } else { nbActifs++; }
+  });
+  const collectorStatsEl = document.getElementById('collectorStats');
+  if (collectorStatsEl) {
+    collectorStatsEl.textContent = `${nbActifs} contrat(s) actif(s) · ${nbInactifs} inactif(s)`;
+  }
 
-  const versementsNonAnnules = state.payments.filter((p) => p.statut !== 'annule');
+  // --- Masque les champs redondants avec les nouveaux soldes simplifiés ---
+  ['commissionConfirmee', 'commissionAttente'].forEach((id) => {
+    const el = document.getElementById(id);
+    if (el && el.parentElement) el.parentElement.style.display = 'none';
+  });
+
+  // --- Calculs des 5 soldes simplifiés ---
+  const soldeTotalEpargneNet = calculerSoldeTotalEpargneNet();
+  const { commissionTotale100, commissionCollecteur30 } = calculerCommissionsMoisEnCours();
+  const totalCollecte = soldeTotalEpargneNet + commissionTotale100;
+
+  // --- Calcul (inchangé) de la commission disponible au retrait, cumulée
+  // depuis le début (nécessaire pour le bouton de demande de retrait) ---
   const versementsConfirmes = state.payments.filter((p) => p.statut === 'confirme');
-  const versementConfirmeTotal = versementsNonAnnules.reduce((s, p) => s + Number(p.montant || 0), 0);
-  const versementNonConfirmeTotal = state.payments.filter((p) => p.statut === 'collecte').reduce((s, p) => s + Number(p.montant || 0), 0);
-
-  const contratsJournaliers = state.contracts.filter((c) => (c.type_contrat || 'journalier') === 'journalier');
-  const contratsConfirmes = contratsJournaliers.filter((c) =>
-    state.payments.some((p) => p.contract_id === c.id && p.jour_numero === 1 && p.statut !== 'annule')
-  ).length;
-
   const commissionsConfirmees = versementsConfirmes.filter((p) => p.jour_numero === 1);
   const totalCommissionConfirmee = commissionsConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
   const commissionInscriptions = totalCommissionConfirmee * TAUX_COMMISSION;
-
   const fraisInscriptionCollecteur = state.fraisInscriptions.reduce((s, f) => s + Number(f.montant_collecteur || 0), 0);
-
   const commissionInterets = state.interetsPartages.reduce((s, i) => s + Number(i.montant_collecteur || 0), 0);
   const CC = commissionInscriptions + fraisInscriptionCollecteur + commissionInterets;
-
-  const soldeTotalEpargnes = state.contracts
-    .filter((c) => c.statut === 'actif')
-    .reduce((s, c) => s + Math.max(0, calculerEpargneNetteContrat(c)), 0);
-
-  const commissionsNonConfirmees = state.payments.filter((p) => p.statut === 'collecte' && p.jour_numero === 1);
-  const totalCommissionNonConfirmee = commissionsNonConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
-  const commissionEnAttente = totalCommissionNonConfirmee * TAUX_COMMISSION;
-
   const retraitsCommissionConfirmes = state.retraitsCommission.filter((r) => r.statut === 'confirme');
   const retraitsCommissionEnAttente = state.retraitsCommission.filter((r) => r.statut === 'en_attente');
   const totalRetraitCommissionConfirme = retraitsCommissionConfirmes.reduce((s, r) => s + Number(r.montant || 0), 0);
   const totalRetraitCommissionEnAttente = retraitsCommissionEnAttente.reduce((s, r) => s + Number(r.montant || 0), 0);
   const commissionDisponibleRetrait = Math.max(0, CC - totalRetraitCommissionConfirme - totalRetraitCommissionEnAttente);
 
-  document.getElementById('collectorStats').textContent = `${state.contracts.length} contrat(s)`;
-  document.getElementById('commissionConfirmee').textContent = formatGNF(CC);
-  document.getElementById('commissionAttente').textContent = formatGNF(commissionEnAttente);
-
   let situationBloc = document.getElementById('situationGenerale');
   if (!situationBloc) {
     situationBloc = document.createElement('div');
     situationBloc.id = 'situationGenerale';
     situationBloc.innerHTML = `
-      <div class="soldes-row"><span>Solde total des épargnes (tous types) : <b id="soldeTotalEpargnes">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Solde total d'épargne net : <b id="soldeTotalEpargneNet">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Solde des commissions collecteur (mois en cours, 30%) : <b id="soldeCommissionCollecteurMois">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission totale (mois en cours, 100%) : <b id="soldeCommissionTotaleMois">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Total collecté : <b id="soldeTotalCollecte">0 GNF</b></span></div>
       <hr style="margin:10px 0; border:none; border-top:1px solid #eee;">
-      <div class="soldes-row"><span>Contrats journaliers confirmés : <b id="nbContratsConfirmes">0</b></span></div>
-      <div class="soldes-row"><span>Versement total comptabilisé : <b id="versementConfirme">0 GNF</b></span></div>
-      <div class="soldes-row"><span>En attente de verrouillage (24h) : <b id="versementNonConfirme">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Total collecté (TC) : <b id="soldeTC">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Commission inscriptions journalier (30%, verrouillée) : <b id="soldeCommissionInscriptions">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Frais d'inscription hebdo/mensuel (ma part) : <b id="soldeFraisInscription">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Commission intérêts prêts : <b id="soldeCommissionInterets">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Commission réalisée (total) : <b id="soldeCC">0 GNF</b></span></div>
+      <p style="font-weight:bold; margin-bottom:6px;">Épargne nette par type de contrat</p>
+      <div id="soldesParType"></div>
       <hr style="margin:10px 0; border:none; border-top:1px solid #eee;">
-      <div class="soldes-row"><span>Déjà retiré : <b id="soldeRetraitCommissionConfirme">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Retrait en attente de validation PDG : <b id="soldeRetraitCommissionAttente">0 GNF</b></span></div>
       <div class="soldes-row"><span>Commission disponible au retrait : <b id="soldeCommissionDisponible">0 GNF</b></span></div>
       <button type="button" id="btn-demander-retrait-commission" style="margin-top:10px;">Demander le retrait de ma commission</button>
+      <button type="button" id="btn-historique-retraits" class="secondary" style="margin-top:10px;">HISTORIQUE DES RETRAIT</button>
     `;
     document.getElementById('commissionAttente').closest('.card').appendChild(situationBloc);
     document.getElementById('btn-demander-retrait-commission').addEventListener('click', ouvrirDemandeRetraitCommission);
+    document.getElementById('btn-historique-retraits').addEventListener('click', ouvrirHistoriqueRetraits);
   }
 
-  document.getElementById('soldeTotalEpargnes').textContent = formatGNF(soldeTotalEpargnes > 0 ? soldeTotalEpargnes : 0);
-  document.getElementById('nbContratsConfirmes').textContent = contratsConfirmes;
-  document.getElementById('versementConfirme').textContent = formatGNF(versementConfirmeTotal);
-  document.getElementById('versementNonConfirme').textContent = formatGNF(versementNonConfirmeTotal);
-  document.getElementById('soldeTC').textContent = formatGNF(TC);
-  document.getElementById('soldeCommissionInscriptions').textContent = formatGNF(commissionInscriptions);
-  document.getElementById('soldeFraisInscription').textContent = formatGNF(fraisInscriptionCollecteur);
-  document.getElementById('soldeCommissionInterets').textContent = formatGNF(commissionInterets);
-  document.getElementById('soldeCC').textContent = formatGNF(CC);
-  document.getElementById('soldeRetraitCommissionConfirme').textContent = formatGNF(totalRetraitCommissionConfirme);
-  document.getElementById('soldeRetraitCommissionAttente').textContent = formatGNF(totalRetraitCommissionEnAttente);
+  document.getElementById('soldeTotalEpargneNet').textContent = formatGNF(soldeTotalEpargneNet > 0 ? soldeTotalEpargneNet : 0);
+  document.getElementById('soldeCommissionCollecteurMois').textContent = formatGNF(commissionCollecteur30);
+  document.getElementById('soldeCommissionTotaleMois').textContent = formatGNF(commissionTotale100);
+  document.getElementById('soldeTotalCollecte').textContent = formatGNF(totalCollecte);
   document.getElementById('soldeCommissionDisponible').textContent = formatGNF(commissionDisponibleRetrait);
+  renderSoldesParType();
 
   const btnRetrait = document.getElementById('btn-demander-retrait-commission');
   if (btnRetrait) {
     btnRetrait.disabled = commissionDisponibleRetrait <= 0;
     btnRetrait.dataset.disponible = commissionDisponibleRetrait;
+  }
+}
+
+function estContratDuMoisEnCours(contrat) {
+  if (!contrat || !contrat.date_debut) return false;
+  const d = contrat.date_debut instanceof Date ? contrat.date_debut : new Date(contrat.date_debut);
+  if (isNaN(d.getTime())) return false;
+  const maintenant = new Date();
+  return d.getFullYear() === maintenant.getFullYear() && d.getMonth() === maintenant.getMonth();
+}
+
+function calculerCommissionsMoisEnCours() {
+  const contratsDuMois = state.contracts.filter(estContratDuMoisEnCours);
+  const idsDuMois = new Set(contratsDuMois.map((c) => c.id));
+
+  const jour1DuMois = state.payments.filter(
+    (p) => p.statut === 'confirme' && p.jour_numero === 1 && idsDuMois.has(p.contract_id)
+  );
+  const totalJour1 = jour1DuMois.reduce((s, p) => s + Number(p.montant || 0), 0);
+
+  const fraisDuMois = state.fraisInscriptions.filter((f) => idsDuMois.has(f.contract_id));
+  const totalFrais = fraisDuMois.reduce(
+    (s, f) => s + (Number(f.montant_pdg || 0) + Number(f.montant_collecteur || 0)), 0
+  );
+  const totalFraisCollecteur = fraisDuMois.reduce((s, f) => s + Number(f.montant_collecteur || 0), 0);
+
+  const pretsDuMoisIds = new Set(state.prets.filter((p) => idsDuMois.has(p.contract_id)).map((p) => p.id));
+  const interetsDuMois = state.interetsPartages.filter((i) => pretsDuMoisIds.has(i.pret_id));
+  const totalInterets = interetsDuMois.reduce(
+    (s, i) => s + (Number(i.montant_pdg || 0) + Number(i.montant_collecteur || 0)), 0
+  );
+  const totalInteretsCollecteur = interetsDuMois.reduce((s, i) => s + Number(i.montant_collecteur || 0), 0);
+
+  const commissionTotale100 = totalJour1 + totalFrais + totalInterets;
+  const commissionCollecteur30 = totalJour1 * 0.30 + totalFraisCollecteur + totalInteretsCollecteur;
+
+  return { commissionTotale100, commissionCollecteur30 };
+}
+
+function calculerSoldeTotalEpargneNet() {
+  const TC = state.payments.filter((p) => p.statut !== 'annule').reduce((s, p) => s + Number(p.montant || 0), 0);
+  const commissionJournalierTotale = state.payments
+    .filter((p) => p.statut === 'confirme' && p.jour_numero === 1)
+    .reduce((s, p) => s + Number(p.montant || 0), 0);
+  const retraitsConfirmesTotal = state.retraitsConfirmesMembres.reduce((s, r) => s + Number(r.montant || 0), 0);
+  return TC - commissionJournalierTotale - retraitsConfirmesTotal;
+}
+
+function calculerEpargneNetteParType(typeContratCle) {
+  const contrats = state.contracts.filter((c) => (c.type_contrat || 'journalier') === typeContratCle);
+  return contrats.reduce((s, c) => s + Math.max(0, calculerEpargneNetteContrat(c)), 0);
+}
+
+function renderSoldesParType() {
+  const container = document.getElementById('soldesParType');
+  if (!container) return;
+  const types = ['journalier', 'hebdomadaire', 'mensuel'];
+  container.innerHTML = types.map((t) => {
+    const infoType = infoTypeContrat(t);
+    const montant = calculerEpargneNetteParType(t);
+    return `<div class="soldes-row"><span>${infoType.label} : <b>${formatGNF(montant)}</b></span></div>`;
+  }).join('');
+}
+
+// ==========================================================
+// --- NOUVEAU (16 sept 2026) : bouton "HISTORIQUE DES RETRAIT" — liste des
+// membres ayant effectué un retrait ou un prêt confirmé, avec date et
+// montant.
+// ==========================================================
+function ouvrirHistoriqueRetraits() {
+  const items = [...state.retraitsConfirmesMembres].sort(
+    (a, b) => (b.date_confirmation?.toMillis?.() || b.dateCreation?.toMillis?.() || 0)
+      - (a.date_confirmation?.toMillis?.() || a.dateCreation?.toMillis?.() || 0)
+  );
+  const html = `
+    <h2>Historique des retraits et prêts</h2>
+    <p class="subtitle-sm">Membres ayant effectué un retrait ou obtenu un prêt (confirmés).</p>
+    <div style="max-height:340px; overflow-y:auto; margin-top:10px;">
+      ${items.length === 0 ? '<p style="color:#999; font-size:13px;">Aucun retrait ou prêt confirmé pour le moment.</p>' : items.map((r) => {
+        const libelle = libelleTypeRetrait(r.type);
+        const dateAffichee = formatDateHeure(r.date_confirmation || r.dateCreation);
+        return `
+          <div class="retrait-row">
+            <div class="retrait-row-top">
+              <div>
+                <strong>${r.memberName || 'Membre'}</strong><br>
+                <small>${libelle}</small><br>
+                <small style="color:#999;">${dateAffichee}</small>
+              </div>
+              <span class="badge attente">${formatGNF(r.montant)}</span>
+            </div>
+          </div>
+        `;
+      }).join('')}
+    </div>
+    <div class="modal-actions" style="margin-top:14px;">
+      <button type="button" class="secondary" id="modal-fermer-historique" style="flex:1;">Fermer</button>
+    </div>
+  `;
+  ouvrirModal(html);
+  document.getElementById('modal-fermer-historique').addEventListener('click', fermerModal);
+}
+
+// ==========================================================
+// --- NOUVEAU (16 sept 2026) : b) compteur du nombre total de membres,
+// affiché entre parenthèses après le texte "Mes membres". Sans accès au
+// HTML, on cherche l'élément par correspondance exacte de son texte.
+// ==========================================================
+function mettreAJourCompteurMembres() {
+  const nombreMembresTotal = new Set(state.contracts.map((c) => c.membre_id)).size;
+  const elements = document.querySelectorAll('h1, h2, h3, h4, span, p, strong, b, div, button, a');
+  for (const el of elements) {
+    if (el.children.length === 0) {
+      const texte = el.textContent.trim();
+      if (texte === 'Mes membres' || /^Mes membres \(\d+\)$/.test(texte)) {
+        el.textContent = `Mes membres (${nombreMembresTotal})`;
+        return;
+      }
+    }
   }
 }
 
@@ -945,11 +1082,13 @@ function trouverContratsNonSoldes(membreId, contratExclureId) {
     !c.epargne_soldee
   );
 }
-// === FIN COLLECTEUR — PARTIE 1/2 ===
-// === COLLECTEUR — PARTIE 2/2 ===
+// === FIN COLLECTEUR — PARTIE 1/2 ===// === COLLECTEUR — PARTIE 2/2 ===
 function renderMembersList() {
   const container = document.getElementById('membersList');
   container.innerHTML = '';
+
+  // --- NOUVEAU (16 sept 2026) : met à jour "Mes membres (N)" à chaque rendu ---
+  mettreAJourCompteurMembres();
 
   const versementsConfirmesTous = state.payments.filter((p) => p.statut !== 'annule');
 
