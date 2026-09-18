@@ -6,6 +6,14 @@
 <title>CPCT-TINA Collecteur</title>
 <link rel="manifest" href="manifest.json" />
 <meta name="theme-color" content="#0d6efd" />
+
+<!-- Installation sur iPhone (Safari) -->
+<link rel="apple-touch-icon" href="icon-192.png" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-title" content="TINA Collecteur" />
+<meta name="apple-mobile-web-app-status-bar-style" content="default" />
+
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body { font-family: Arial, sans-serif; background: #f4f6f8; color: #222; }
@@ -180,8 +188,27 @@
   <div id="modal-content" class="modal-content"></div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/eruda"></script>
-<script>eruda.init();</script>
+<!-- Console de débogage Eruda : chargée uniquement si l'adresse contient ?debug=1 -->
+<script>
+  if (location.search.indexOf('debug=1') !== -1) {
+    var erudaScript = document.createElement('script');
+    erudaScript.src = 'https://cdn.jsdelivr.net/npm/eruda';
+    erudaScript.onload = function () { if (window.eruda) { window.eruda.init(); } };
+    document.head.appendChild(erudaScript);
+  }
+</script>
+
+<!-- Service worker (nécessaire à l'installation de l'application) -->
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('./sw.js').catch(function (e) {
+        console.warn('Service worker non enregistré :', e);
+      });
+    });
+  }
+</script>
+
 <script type="module" src="js/app.js"></script>
 </body>
 </html>
