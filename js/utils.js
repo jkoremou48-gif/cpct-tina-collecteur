@@ -80,6 +80,18 @@ export const TYPES_CONTRAT = {
     labelPeriode: "mois",
     labelVersement: "versement mensuel",
   },
+  // --- NOUVEAU (19 sept 2026) : tontine tournante. Ce type ne crée AUCUN
+  // contrat dans la collection "contracts" : il sert uniquement aux libellés
+  // (listes de types, propositions). Ses données sont dans les collections
+  // caisses_tournantes / tournante_membres / tournante_operations. ---
+  tournante: {
+    cle: "tournante",
+    label: "Tontine tournante",
+    duree: 0,
+    unitePeriode: "tour",
+    labelPeriode: "tour",
+    labelVersement: "cotisation",
+  },
 };
 
 export function infoTypeContrat(typeContrat) {
