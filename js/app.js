@@ -15,6 +15,12 @@ import {
   calculerStatutContrat, TYPES_CONTRAT, infoTypeContrat, calculerMontantDuPretGeneralise,
 } from "./utils.js";
 
+// --- NOUVEAU (19 sept 2026) : tontine tournante ---
+import {
+  listerCaissesOuvertes, adhererCaisse, finaliserAdhesionsEnAttente,
+  chargerSoldeSecurite, esc, PERIODICITES, libelleStatutCaisse,
+} from "./tournante-commun.js";
+
 const TAUX_COMMISSION = 0.30;
 const PART_INTERET_COLLECTEUR = 0.30;
 const PART_INTERET_PDG = 0.70;
@@ -42,6 +48,9 @@ const state = {
   parametresInterets: { pdg: 0.70, collecteur: 0.30, redistribution: 0 },
   propositionsReconduction: [],
   propositionsNouveauContrat: [],
+  // --- NOUVEAU (19 sept 2026) : tontine tournante ---
+  caissesTournante: [],
+  membresTournante: [],
   unsubscribers: [],
 };
 let creationEnCours = false;
@@ -405,14 +414,35 @@ function lancerDashboard() {
     (snap) => {
       state.propositionsNouveauContrat = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
       renderAll();
+      // --- NOUVEAU (19 sept 2026) : finalise les adhésions tontine tournante
+      // confirmées par les membres ---
+      finaliserAdhesionsEnAttente(state.propositionsNouveauContrat).catch((err) => console.error(err));
     }
+  );
+
+  // --- NOUVEAU (19 sept 2026) : tontine tournante (caisses et membres du collecteur) ---
+  const unsubCaissesTournante = onSnapshot(
+    query(collection(db, 'caisses_tournantes'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.caissesTournante = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    },
+    (err) => console.warn('Caisses tournantes :', err)
+  );
+  const unsubMembresTournante = onSnapshot(
+    query(collection(db, 'tournante_membres'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
+    (snap) => {
+      state.membresTournante = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      renderAll();
+    },
+    (err) => console.warn('Membres tontine tournante :', err)
   );
 
   state.unsubscribers.push(
     unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements,
     unsubRetraits, unsubRetraitsConfirmesMembres, unsubInterets, unsubRetraitsCommission, unsubDiffusions, unsubMesMessages,
     unsubFraisInscription, unsubDepenses, unsubRedistributions, unsubParametres, unsubPropositions,
-    unsubPropositionsNouveauContrat
+    unsubPropositionsNouveauContrat, unsubCaissesTournante, unsubMembresTournante
   );
 }
 
@@ -421,6 +451,7 @@ function renderAll() {
   renderRetraitsMembres();
   renderReconductionsATraiter();
   renderCommunicationCollecteur();
+  renderCaissesTournante();
   renderMembersList();
 }
 
@@ -524,6 +555,15 @@ function estContratDuMoisEnCours(contrat) {
   return d.getFullYear() === maintenant.getFullYear() && d.getMonth() === maintenant.getMonth();
 }
 
+// --- NOUVEAU (19 sept 2026) : date (Timestamp Firestore ou texte) dans le mois en cours ---
+function estDuMoisEnCours(dateVal) {
+  if (!dateVal) return false;
+  const d = dateVal.toDate ? dateVal.toDate() : new Date(dateVal);
+  if (isNaN(d.getTime())) return false;
+  const maintenant = new Date();
+  return d.getFullYear() === maintenant.getFullYear() && d.getMonth() === maintenant.getMonth();
+}
+
 function calculerCommissionsMoisEnCours() {
   const contratsDuMois = state.contracts.filter(estContratDuMoisEnCours);
   const idsDuMois = new Set(contratsDuMois.map((c) => c.id));
@@ -546,8 +586,17 @@ function calculerCommissionsMoisEnCours() {
   );
   const totalInteretsCollecteur = interetsDuMois.reduce((s, i) => s + Number(i.montant_collecteur || 0), 0);
 
-  const commissionTotale100 = totalJour1 + totalFrais + totalInterets;
-  const commissionCollecteur30 = totalJour1 * 0.30 + totalFraisCollecteur + totalInteretsCollecteur;
+  // --- NOUVEAU (19 sept 2026) : frais et pénalités de la tontine tournante du mois ---
+  const fraisTournanteDuMois = state.fraisInscriptions.filter(
+    (f) => f.source === 'tontine_tournante' && estDuMoisEnCours(f.date)
+  );
+  const totalFraisTournante = fraisTournanteDuMois.reduce(
+    (s, f) => s + (Number(f.montant_pdg || 0) + Number(f.montant_collecteur || 0)), 0
+  );
+  const totalFraisTournanteCollecteur = fraisTournanteDuMois.reduce((s, f) => s + Number(f.montant_collecteur || 0), 0);
+
+  const commissionTotale100 = totalJour1 + totalFrais + totalInterets + totalFraisTournante;
+  const commissionCollecteur30 = totalJour1 * 0.30 + totalFraisCollecteur + totalInteretsCollecteur + totalFraisTournanteCollecteur;
 
   return { commissionTotale100, commissionCollecteur30 };
 }
@@ -620,9 +669,12 @@ function ouvrirHistoriqueRetraits() {
 // --- NOUVEAU (16 sept 2026) : b) compteur du nombre total de membres,
 // affiché entre parenthèses après le texte "Mes membres". Sans accès au
 // HTML, on cherche l'élément par correspondance exacte de son texte.
+// --- MODIFIÉ (19 sept 2026) : compte aussi les membres de tontine tournante.
 // ==========================================================
 function mettreAJourCompteurMembres() {
-  const nombreMembresTotal = new Set(state.contracts.map((c) => c.membre_id)).size;
+  const nombreMembresTotal = new Set(
+    [...state.contracts.map((c) => c.membre_id), ...state.membresTournante.map((m) => m.membre_uid)].filter(Boolean)
+  ).size;
   const elements = document.querySelectorAll('h1, h2, h3, h4, span, p, strong, b, div, button, a');
   for (const el of elements) {
     if (el.children.length === 0) {
@@ -1083,6 +1135,161 @@ function trouverContratsNonSoldes(membreId, contratExclureId) {
   );
 }
 // === FIN COLLECTEUR — PARTIE 1/2 ===// === COLLECTEUR — PARTIE 2/2 ===
+
+// ==========================================================
+// --- NOUVEAU (19 sept 2026) : TONTINE TOURNANTE côté collecteur ---
+// ==========================================================
+let caissesOuvertesCache = [];
+
+function renderCaissesTournante() {
+  let zone = document.getElementById('caissesTournanteZone');
+  if (!zone) {
+    const listeEl = document.getElementById('membersList');
+    const carteMembres = listeEl ? listeEl.closest('.card') : null;
+    if (!carteMembres) return;
+    zone = document.createElement('div');
+    zone.id = 'caissesTournanteZone';
+    zone.className = 'card';
+    carteMembres.insertAdjacentElement('beforebegin', zone);
+  }
+
+  if (state.caissesTournante.length === 0) {
+    zone.style.display = 'none';
+    zone.innerHTML = '';
+    return;
+  }
+  zone.style.display = '';
+
+  const caisses = [...state.caissesTournante].sort(
+    (a, b) => String(a.nom || '').localeCompare(String(b.nom || ''), 'fr')
+  );
+  zone.innerHTML = `
+    <h3>Mes caisses tournantes</h3>
+    <p style="color:#666; font-size:13px; margin-top:4px;">Caisses dont vous êtes le collecteur.</p>
+    <div style="margin-top:8px;">
+      ${caisses.map((c) => {
+        const nb = state.membresTournante.filter((m) => m.caisse_id === c.id).length;
+        const texteStatut = c.statut === 'inscriptions'
+          ? `Inscriptions jusqu'au ${formatDate(c.date_limite_inscription)}`
+          : c.statut === 'en_cours' ? `Tour ${c.tour_actuel}/${c.nb_tours}` : 'Clôturée';
+        const classe = c.statut === 'en_cours' ? 'ok' : c.statut === 'inscriptions' ? 'due' : 'attente';
+        return `
+          <div class="member-row">
+            <div>
+              <strong>${esc(c.nom)}</strong><br>
+              <small>${esc(PERIODICITES[c.periodicite] || '')} · cotisation ${formatGNF(c.montant_cotisation)} · ${nb} membre(s)</small>
+            </div>
+            <span class="badge ${classe}">${esc(texteStatut)}</span>
+          </div>
+        `;
+      }).join('')}
+    </div>
+  `;
+}
+
+function construireLigneTournante(m, afficherBoutonNouveauContrat) {
+  const caisse = state.caissesTournante.find((c) => c.id === m.caisse_id);
+  const arriere = (m.arrieres || []).reduce((s, a) => s + Number(a.montant || 0), 0);
+  const texteRang = m.rang
+    ? `Tour ${m.rang}${caisse && caisse.nb_tours ? '/' + caisse.nb_tours : ''}`
+    : 'en attente du démarrage';
+  const classeStatut = !caisse ? 'attente' : caisse.statut === 'en_cours' ? 'ok' : caisse.statut === 'inscriptions' ? 'due' : 'attente';
+  const texteStatut = !caisse ? '—' : libelleStatutCaisse(caisse.statut);
+
+  const row = document.createElement('div');
+  row.className = 'member-row';
+  row.innerHTML = `
+    <div>
+      <strong style="cursor:pointer; text-decoration:underline;">${esc(m.nom)}</strong>
+      <span class="badge" style="background:#e9ecef; color:#333; margin-left:6px;">${infoTypeContrat('tournante').label}</span><br>
+      <small>${esc(caisse ? caisse.nom : 'Caisse')} · ${texteRang}</small>
+      ${caisse ? `<br><small>Cotisation : ${formatGNF(caisse.montant_cotisation)}</small>` : ''}
+      ${arriere > 0 ? `<br><small style="color:#c0392b; font-weight:bold;">Arriéré à rattraper : ${formatGNF(arriere)}</small>` : ''}
+    </div>
+    <div style="text-align:right;">
+      <span class="badge ${classeStatut}">${esc(texteStatut)}</span><br>
+      ${afficherBoutonNouveauContrat ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#198754;" data-nouveau-contrat="${esc(m.membre_uid)}">Nouveau contrat</button>` : ''}
+    </div>
+  `;
+  row.querySelector('strong').addEventListener('click', () => afficherDetailsTournante(m));
+  const btnNouveau = row.querySelector('button[data-nouveau-contrat]');
+  if (btnNouveau) {
+    btnNouveau.addEventListener('click', () => ouvrirNouveauContrat(m.membre_uid, m.nom));
+  }
+  return row;
+}
+
+async function afficherDetailsTournante(m) {
+  const caisse = state.caissesTournante.find((c) => c.id === m.caisse_id);
+  let solde = 0;
+  let operations = [];
+  try {
+    const r = await chargerSoldeSecurite(m.id);
+    solde = r.solde;
+    operations = r.operations;
+  } catch (err) {
+    console.error(err);
+  }
+  const arriere = (m.arrieres || []).reduce((s, a) => s + Number(a.montant || 0), 0);
+
+  ouvrirModal(`
+    <h2>${esc(m.nom)}</h2>
+    <p class="subtitle-sm">Téléphone : ${esc(m.telephone || '—')} · ${esc(caisse ? caisse.nom : 'Caisse')} · ${infoTypeContrat('tournante').label}</p>
+    <div class="soldes-row"><span>Cotisation : <b>${formatGNF(caisse ? caisse.montant_cotisation : 0)}</b></span></div>
+    <div class="soldes-row"><span>Rang de passage : <b>${m.rang ? 'Tour ' + m.rang : 'pas encore défini'}</b></span></div>
+    <div class="soldes-row"><span>Solde de sécurité : <b style="${solde < 0 ? 'color:#c0392b;' : ''}">${formatGNF(solde)}</b></span></div>
+    ${arriere > 0 ? `<div class="soldes-row"><span style="color:#c0392b;">Arriéré à rattraper : <b>${formatGNF(arriere)}</b></span></div>` : ''}
+    <h2 style="margin-top:14px; font-size:15px;">Mouvements du solde de sécurité</h2>
+    <div style="max-height:200px; overflow-y:auto; margin-top:6px;">
+      ${operations.length === 0
+        ? '<p style="color:#999; font-size:13px;">Aucun mouvement.</p>'
+        : operations.slice(0, 15).map((o) => `
+            <div class="soldes-row"><span>${formatDateHeure(o.date)} — ${esc(o.libelle || '')}</span><span style="${Number(o.montant) < 0 ? 'color:#c0392b;' : 'color:#198754;'}">${formatGNF(o.montant)}</span></div>
+          `).join('')}
+    </div>
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="modal-fermer-details-tt" style="flex:1;">Fermer</button>
+    </div>
+  `);
+  document.getElementById('modal-fermer-details-tt').addEventListener('click', fermerModal);
+}
+
+// Remplit la liste des caisses ouvertes aux inscriptions dans un <select>
+async function chargerCaissesDansSelect(selectId, infoId) {
+  const select = document.getElementById(selectId);
+  if (!select) return;
+  select.innerHTML = '<option value="">Chargement…</option>';
+  try {
+    caissesOuvertesCache = await listerCaissesOuvertes(state.currentCollecteurData.uid);
+  } catch (err) {
+    console.error(err);
+    caissesOuvertesCache = [];
+  }
+  const selectApres = document.getElementById(selectId);
+  const info = document.getElementById(infoId);
+  if (!selectApres) return; // fenêtre fermée entre-temps
+  if (caissesOuvertesCache.length === 0) {
+    selectApres.innerHTML = '<option value="">Aucune caisse ouverte</option>';
+    if (info) info.textContent = "Aucune caisse tournante n'est ouverte aux inscriptions. Le PDG doit en créer une pour votre compte.";
+    return;
+  }
+  selectApres.innerHTML = caissesOuvertesCache
+    .map((c) => `<option value="${esc(c.id)}">${esc(c.nom)} — cotisation ${formatGNF(c.montant_cotisation)}</option>`)
+    .join('');
+  selectApres.addEventListener('change', () => majInfoCaisse(selectId, infoId));
+  majInfoCaisse(selectId, infoId);
+}
+
+function majInfoCaisse(selectId, infoId) {
+  const select = document.getElementById(selectId);
+  const info = document.getElementById(infoId);
+  if (!select || !info) return;
+  const caisse = caissesOuvertesCache.find((c) => c.id === select.value);
+  info.textContent = caisse
+    ? `Caution : ${formatGNF(caisse.montant_caution)} dont ${formatGNF(caisse.frais_inscription)} de frais d'inscription (enregistrés automatiquement). Inscriptions jusqu'au ${formatDate(caisse.date_limite_inscription)}.`
+    : '';
+}
+
 function renderMembersList() {
   const container = document.getElementById('membersList');
   container.innerHTML = '';
@@ -1108,7 +1315,8 @@ function renderMembersList() {
   const contratsAffiches = [...contratsActifsTous, ...Object.values(dernierClotureParMembre)]
     .sort((a, b) => (a.membre_nom || '').localeCompare(b.membre_nom || '', 'fr'));
 
-  if (contratsAffiches.length === 0) {
+  // --- MODIFIÉ (19 sept 2026) : les membres de tontine tournante comptent aussi ---
+  if (contratsAffiches.length === 0 && state.membresTournante.length === 0) {
     container.innerHTML = '<p style="color:#999;">Aucun membre assigné.</p>';
     return;
   }
@@ -1190,6 +1398,14 @@ function renderMembersList() {
     }
     container.appendChild(row);
   });
+
+  // --- NOUVEAU (19 sept 2026) : lignes des membres de tontine tournante ---
+  const idsAvecContrat = new Set(contratsAffiches.map((c) => c.membre_id));
+  [...state.membresTournante]
+    .sort((a, b) => String(a.nom || '').localeCompare(String(b.nom || ''), 'fr'))
+    .forEach((m) => {
+      container.appendChild(construireLigneTournante(m, !idsAvecContrat.has(m.membre_uid)));
+    });
 }
 
 function getStatutContrat(contrat, versements) {
@@ -1285,7 +1501,13 @@ function ouvrirNouveauContrat(membreId, membreNom) {
           <option value="journalier">${TYPES_CONTRAT.journalier.label}</option>
           <option value="hebdomadaire">${TYPES_CONTRAT.hebdomadaire.label}</option>
           <option value="mensuel">${TYPES_CONTRAT.mensuel.label}</option>
+          <option value="tournante">${TYPES_CONTRAT.tournante.label}</option>
         </select>
+      </div>
+      <div class="field-row hidden" id="champ-caisse-nc">
+        <label>Caisse tournante</label>
+        <select name="caisseId" id="select-caisse-nc"></select>
+        <small id="info-caisse-nc" style="color:#666;"></small>
       </div>
       <div class="field-row">
         <label id="label-montant-periode-nc">Montant du versement quotidien (GNF)</label>
@@ -1302,7 +1524,8 @@ function ouvrirNouveauContrat(membreId, membreNom) {
     </form>
   `);
   document.getElementById('select-type-contrat-nc').addEventListener('change', (e) => {
-    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nc', 'champ-frais-inscription-nc');
+    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nc', 'champ-frais-inscription-nc', 'champ-caisse-nc');
+    if (e.target.value === 'tournante') chargerCaissesDansSelect('select-caisse-nc', 'info-caisse-nc');
   });
   document.getElementById('modal-annuler-nouveau-contrat').addEventListener('click', fermerModal);
   document.getElementById('form-nouveau-contrat').addEventListener('submit', async (e) => {
@@ -1313,6 +1536,34 @@ function ouvrirNouveauContrat(membreId, membreNom) {
     const fraisInscription = Number(fd.get('fraisInscription') || 0);
 
     try {
+      // --- NOUVEAU (19 sept 2026) : proposition d'adhésion à une caisse tournante ---
+      if (typeContrat === 'tournante') {
+        const caisse = caissesOuvertesCache.find((c) => c.id === fd.get('caisseId'));
+        if (!caisse) {
+          notifier('Choisissez une caisse tournante ouverte aux inscriptions.', 'erreur');
+          return;
+        }
+        if (state.membresTournante.some((m) => m.membre_uid === membreId && m.caisse_id === caisse.id)) {
+          notifier('Ce membre est déjà inscrit dans cette caisse.', 'erreur');
+          return;
+        }
+        await addDoc(collection(db, 'propositions_nouveau_contrat'), {
+          membre_id: membreId,
+          membre_nom: membreNom,
+          collecteur_id: state.currentCollecteurData.uid,
+          type_contrat: 'tournante',
+          montant_periode: caisse.montant_cotisation,
+          frais_inscription: caisse.frais_inscription,
+          caisse_id: caisse.id,
+          caisse_nom: caisse.nom,
+          statut: 'en_attente',
+          date: serverTimestamp(),
+        });
+        notifier('Proposition d\'adhésion envoyée au membre.', 'succes');
+        fermerModal();
+        return;
+      }
+
       await addDoc(collection(db, 'propositions_nouveau_contrat'), {
         membre_id: membreId,
         membre_nom: membreNom,
@@ -1332,10 +1583,30 @@ function ouvrirNouveauContrat(membreId, membreNom) {
   });
 }
 
-function basculerChampsTypeContrat(typeContrat, labelMontantId, champFraisId) {
-  const infoType = infoTypeContrat(typeContrat);
-  document.getElementById(labelMontantId).textContent = `Montant du ${infoType.labelVersement} (GNF)`;
+// --- MODIFIÉ (19 sept 2026) : gère aussi le type "tournante" (champ caisse à la place
+// du montant). Comportement des autres types inchangé. ---
+function basculerChampsTypeContrat(typeContrat, labelMontantId, champFraisId, champCaisseId) {
+  const labelMontant = document.getElementById(labelMontantId);
+  const champMontant = labelMontant ? labelMontant.closest('.field-row') : null;
   const champFrais = document.getElementById(champFraisId);
+  const champCaisse = champCaisseId ? document.getElementById(champCaisseId) : null;
+  const estTournante = typeContrat === 'tournante';
+
+  if (champMontant) {
+    champMontant.classList.toggle('hidden', estTournante);
+    const saisieMontant = champMontant.querySelector('input');
+    if (saisieMontant) saisieMontant.required = !estTournante;
+  }
+  if (champCaisse) champCaisse.classList.toggle('hidden', !estTournante);
+
+  if (estTournante) {
+    champFrais.classList.add('hidden');
+    champFrais.querySelector('input').required = false;
+    return;
+  }
+
+  const infoType = infoTypeContrat(typeContrat);
+  labelMontant.textContent = `Montant du ${infoType.labelVersement} (GNF)`;
   if (typeContrat === 'journalier') {
     champFrais.classList.add('hidden');
     champFrais.querySelector('input').required = false;
@@ -1543,7 +1814,13 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
             <option value="journalier">${TYPES_CONTRAT.journalier.label}</option>
             <option value="hebdomadaire">${TYPES_CONTRAT.hebdomadaire.label}</option>
             <option value="mensuel">${TYPES_CONTRAT.mensuel.label}</option>
+            <option value="tournante">${TYPES_CONTRAT.tournante.label}</option>
           </select>
+        </div>
+        <div class="field-row hidden" id="champ-caisse-nm">
+          <label>Caisse tournante</label>
+          <select name="caisseId" id="select-caisse-nm"></select>
+          <small id="info-caisse-nm" style="color:#666;"></small>
         </div>
         <div class="field-row">
           <label id="label-montant-periode-nm">Montant du versement quotidien (GNF)</label>
@@ -1560,7 +1837,8 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
       </form>
   `);
   document.getElementById('select-type-contrat-nm').addEventListener('change', (e) => {
-    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nm', 'champ-frais-inscription-nm');
+    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nm', 'champ-frais-inscription-nm', 'champ-caisse-nm');
+    if (e.target.value === 'tournante') chargerCaissesDansSelect('select-caisse-nm', 'info-caisse-nm');
   });
   document.getElementById('modal-annuler-membre').addEventListener('click', fermerModal);
   document.getElementById('form-nouveau-membre').addEventListener('submit', async (e) => {
@@ -1575,6 +1853,16 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
     const montantPeriode = Number(fd.get('montantPeriode'));
     const fraisInscription = Number(fd.get('fraisInscription') || 0);
 
+    // --- NOUVEAU (19 sept 2026) : caisse tournante choisie (vérifiée avant de créer le compte) ---
+    let caisseChoisie = null;
+    if (typeContrat === 'tournante') {
+      caisseChoisie = caissesOuvertesCache.find((c) => c.id === fd.get('caisseId')) || null;
+      if (!caisseChoisie) {
+        notifier('Choisissez une caisse tournante ouverte aux inscriptions.', 'erreur');
+        return;
+      }
+    }
+
     try {
       const emailTechnique = telephoneVersEmailTechnique(telephone);
       const uid = await creerCompteSecondaire(emailTechnique, password);
@@ -1587,13 +1875,17 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
         date_creation: serverTimestamp(),
       });
 
-      await creerContratEtPremierePeriode({
-        membreId: uid,
-        membreNom: nom,
-        typeContrat,
-        montantPeriode,
-        fraisInscription,
-      });
+      if (typeContrat === 'tournante') {
+        await adhererCaisse({ caisse: caisseChoisie, membreUid: uid, membreNom: nom, membreTelephone: telephone });
+      } else {
+        await creerContratEtPremierePeriode({
+          membreId: uid,
+          membreNom: nom,
+          typeContrat,
+          montantPeriode,
+          fraisInscription,
+        });
+      }
 
       fermerModal();
       afficherIdentifiants({ nom, telephone, password });
@@ -1700,153 +1992,4 @@ async function afficherDetailsMembre(contrat) {
     <div class="soldes-row"><span>Versement comptabilisé : <b>${formatGNF(totalConfirme)}</b></span></div>
     <div class="soldes-row"><span>En attente de verrouillage (24h) : <b>${formatGNF(totalNonConfirme)}</b></span></div>
     <div class="soldes-row"><span>Montant du ${infoType.labelVersement} : <b>${formatGNF(contrat.montant_mise || 0)}</b></span></div>
-    <div class="soldes-row"><span>${infoType.labelPeriode.charAt(0).toUpperCase() + infoType.labelPeriode.slice(1)}(s) payé(s) : <b>${versementsComptes.length}/${dureeTotale}</b></span></div>
-    ${totalNonSolde > 0 ? `<div class="soldes-row"><span style="color:#c0392b;">Contrat(s) non soldé(s)</span><span style="color:#c0392b;"><b>${formatGNF(totalNonSolde)}</b></span></div>` : ""}
-    ${depensesContrat.length > 0 ? `
-      <h2 style="margin-top:14px; font-size:15px;">Dépenses de ce contrat</h2>
-      <div style="max-height:150px; overflow-y:auto; margin-top:6px;">
-        ${depensesContrat.map((d) => `
-          <div class="soldes-row"><span>${d.date_depense || ''} — ${d.libelle} ${d.compensee ? '<span style="color:#198754;">(compensée)</span>' : '<span style="color:#e67e22;">(non compensée)</span>'}</span><span>${formatGNF(d.montant)}</span></div>
-        `).join('')}
-      </div>
-    ` : ''}
-    <div class="modal-actions">
-      <button type="button" class="secondary" id="modal-fermer-details" style="flex:1;">Fermer</button>
-    </div>
-  `);
-  document.getElementById('modal-fermer-details').addEventListener('click', fermerModal);
-}
-
-function ouvrirRemboursementPret(pretId) {
-  const pret = state.prets.find((p) => p.id === pretId);
-  if (!pret) return;
-  const montantDu = calculerMontantDuPret(pret);
-  const montant = prompt(`Montant dû : ${formatGNF(montantDu)}\nMontant remboursé aujourd'hui :`);
-  if (montant === null) return;
-  const montantNum = parseFloat(montant);
-  if (isNaN(montantNum) || montantNum <= 0) {
-    notifier('Montant invalide.', 'erreur');
-    return;
-  }
-  enregistrerRemboursement(pret, montantNum, montantDu);
-}
-
-async function enregistrerRemboursement(pret, montant, montantDuAvant) {
-  try {
-    const typeContrat = pret.type_contrat || 'journalier';
-    let interetAccumule;
-    if (typeContrat === 'hebdomadaire' || typeContrat === 'mensuel') {
-      const nbMoisEntamesFn = (await import('./utils.js')).nbMoisEntames;
-      const nbMois = nbMoisEntamesFn(pret.date_debut);
-      interetAccumule = pret.montant_initial * (pret.taux_mensuel || TAUX_MENSUEL_PRET_DEFAUT) * nbMois;
-    } else {
-      const nbSemaines = nbSemainesEntamees(pret);
-      interetAccumule = pret.montant_initial * (pret.taux_hebdo || TAUX_HEBDO_PRET) * nbSemaines;
-    }
-    const interetDejaReconnu = Number(pret.interet_deja_reconnu || 0);
-    const interetNonReconnu = Math.max(0, interetAccumule - interetDejaReconnu);
-    const interetReconnuMaintenant = Math.min(montant, interetNonReconnu);
-
-    await addDoc(collection(db, 'remboursements_prets'), {
-      pret_id: pret.id,
-      membre_id: pret.membre_id,
-      collecteur_id: state.currentCollecteurData.uid,
-      enregistre_par_role: 'collecteur',
-      enregistre_par_uid: state.currentCollecteurData.uid,
-      montant,
-      date: serverTimestamp(),
-    });
-
-    if (interetReconnuMaintenant > 0) {
-      if (typeContrat === 'hebdomadaire' || typeContrat === 'mensuel') {
-        const { pdg, collecteur, redistribution } = state.parametresInterets;
-        const montantPdg = interetReconnuMaintenant * pdg;
-        const montantCollecteur = interetReconnuMaintenant * collecteur;
-        const montantRedistribution = interetReconnuMaintenant * redistribution;
-
-        await addDoc(collection(db, 'interets_prets_repartis'), {
-          pret_id: pret.id,
-          membre_id: pret.membre_id,
-          collecteur_id: state.currentCollecteurData.uid,
-          montant_collecteur: montantCollecteur,
-          montant_pdg: montantPdg,
-          montant_redistribution: montantRedistribution,
-          date: serverTimestamp(),
-        });
-
-        if (montantRedistribution > 0) {
-          await redistribuerAuxMembresAnnuels(pret, montantRedistribution);
-        }
-      } else {
-        const montantCollecteur = interetReconnuMaintenant * PART_INTERET_COLLECTEUR;
-        const montantPdg = interetReconnuMaintenant * PART_INTERET_PDG;
-        await addDoc(collection(db, 'interets_prets_repartis'), {
-          pret_id: pret.id,
-          membre_id: pret.membre_id,
-          collecteur_id: state.currentCollecteurData.uid,
-          montant_collecteur: montantCollecteur,
-          montant_pdg: montantPdg,
-          date: serverTimestamp(),
-        });
-      }
-      await updateDoc(doc(db, 'prets', pret.id), {
-        interet_deja_reconnu: interetDejaReconnu + interetReconnuMaintenant,
-      });
-    }
-
-    if (montant >= montantDuAvant) {
-      await updateDoc(doc(db, 'prets', pret.id), { statut: 'rembourse' });
-      notifier('Prêt entièrement remboursé.', 'succes');
-    } else {
-      notifier('Remboursement enregistré.', 'succes');
-    }
-  } catch (err) {
-    console.error(err);
-    notifier('Erreur : ' + err.message, 'erreur');
-  }
-}
-
-async function redistribuerAuxMembresAnnuels(pretOrigine, montantARepartir) {
-  const beneficiaires = state.contracts.filter((c) =>
-    c.statut === 'actif' &&
-    (c.type_contrat === 'hebdomadaire' || c.type_contrat === 'mensuel') &&
-    c.id !== pretOrigine.contract_id
-  );
-  if (beneficiaires.length === 0) return;
-
-  const totalCotisations = beneficiaires.reduce((s, c) => s + Number(c.montant_mise || 0), 0);
-  if (totalCotisations <= 0) return;
-
-  for (const contrat of beneficiaires) {
-    const part = (Number(contrat.montant_mise || 0) / totalCotisations) * montantARepartir;
-    if (part <= 0) continue;
-    await addDoc(collection(db, 'redistributions_interets'), {
-      pret_id: pretOrigine.id,
-      contract_id: contrat.id,
-      membre_id: contrat.membre_id,
-      membre_nom: contrat.membre_nom,
-      collecteur_id: state.currentCollecteurData.uid,
-      montant: part,
-      date: serverTimestamp(),
-    });
-  }
-}
-
-function ouvrirModal(html) {
-  document.getElementById('modal-content').innerHTML = html;
-  const overlay = document.getElementById('modal-overlay');
-  overlay.classList.remove('hidden');
-  overlay.style.display = 'flex';
-}
-function fermerModal() {
-  const overlay = document.getElementById('modal-overlay');
-  overlay.classList.add('hidden');
-  overlay.style.display = 'none';
-  document.getElementById('modal-content').innerHTML = '';
-}
-document.getElementById('modal-overlay').addEventListener('click', (e) => {
-  if (e.target.id === 'modal-overlay') fermerModal();
-});
-
-demarrer();
-// === FIN COLLECTEUR — PARTIE 2/2 ===
+    <div class="soldes-row"><span>${infoType.labelPeriode.charAt(0).toUpperCase() + infoType.labelPeriode.slice(1)}(s) payé(s) : <b>${versementsComptes.length}/${dureeTotale}</b>
