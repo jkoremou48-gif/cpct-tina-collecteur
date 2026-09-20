@@ -1,4 +1,3 @@
-// === COLLECTEUR — PARTIE 1/2 ===
 // ==========================
 // CPCT-TINA — App Collecteur
 // ==========================
@@ -15,17 +14,11 @@ import {
   calculerStatutContrat, TYPES_CONTRAT, infoTypeContrat, calculerMontantDuPretGeneralise,
 } from "./utils.js";
 
-// --- NOUVEAU (19 sept 2026) : tontine tournante ---
-import {
-  listerCaissesOuvertes, adhererCaisse, finaliserAdhesionsEnAttente,
-  chargerSoldeSecurite, esc, PERIODICITES, libelleStatutCaisse,
-} from "./tournante-commun.js";
-
-const TAUX_COMMISSION = 0.30;
-const PART_INTERET_COLLECTEUR = 0.30;
-const PART_INTERET_PDG = 0.70;
-const TAUX_HEBDO_PRET = 0.02;
-const TAUX_MENSUEL_PRET_DEFAUT = 0.08;
+const TAUX_COMMISSION = 0.30; // journalier uniquement (jour 1)
+const PART_INTERET_COLLECTEUR = 0.30; // journalier uniquement
+const PART_INTERET_PDG = 0.70; // journalier uniquement
+const TAUX_HEBDO_PRET = 0.02; // journalier uniquement
+const TAUX_MENSUEL_PRET_DEFAUT = 0.08; // hebdo/mensuel, si le PDG n'a rien réglé
 const AVATAR_DEFAUT = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='56' height='56'><rect width='56' height='56' fill='%23ddd'/></svg>";
 
 const state = {
@@ -35,7 +28,6 @@ const state = {
   payments: [],
   versements: [],
   withdrawalRequests: [],
-  retraitsConfirmesMembres: [],
   prets: [],
   remboursements: [],
   interetsPartages: [],
@@ -46,11 +38,8 @@ const state = {
   depenses: [],
   redistributions: [],
   parametresInterets: { pdg: 0.70, collecteur: 0.30, redistribution: 0 },
+  // --- NOUVEAU (2 sept 2026) : reconductions de contrat à finaliser ---
   propositionsReconduction: [],
-  propositionsNouveauContrat: [],
-  // --- NOUVEAU (19 sept 2026) : tontine tournante ---
-  caissesTournante: [],
-  membresTournante: [],
   unsubscribers: [],
 };
 let creationEnCours = false;
@@ -85,6 +74,15 @@ function genererMotDePasseMembre(telephone) {
   return chiffres.slice(-6);
 }
 
+// ==========================================================
+// --- CORRECTIF (3 sept 2026) : suppression de compte définitive ---
+// Un collecteur marqué "supprime" ou "licencie" par le PDG (statut sur son
+// document users/{uid}) ne doit plus jamais pouvoir accéder au dashboard,
+// même si son compte Firebase Authentication reste techniquement valide
+// (impossible à supprimer réellement sans Cloud Functions/plan payant).
+// On bloque donc l'accès ici, à chaque connexion ET à chaque rechargement
+// de l'app tant qu'une session existe.
+// ==========================================================
 function demarrer() {
   showOnly(loading);
   onAuthStateChanged(auth, async (user) => {
@@ -280,7 +278,6 @@ function lancerDashboard() {
   document.getElementById('collecteur-avatar').src = state.currentCollecteurData.photoURL || AVATAR_DEFAUT;
   renderCollecteurHeader();
   ajouterBoutonChangerMotDePasse();
-  initialiserBoutonCommunication();
 
   const unsubContracts = onSnapshot(
     query(collection(db, 'contracts'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
@@ -325,19 +322,6 @@ function lancerDashboard() {
       renderAll();
     }
   );
-  // --- NOUVEAU (16 sept 2026) : retraits/prêts CONFIRMÉS des membres,
-  // nécessaires au calcul du solde total d'épargne net et à l'historique. ---
-  const unsubRetraitsConfirmesMembres = onSnapshot(
-    query(
-      collection(db, 'withdrawalRequests'),
-      where('collecteur_id', '==', state.currentCollecteurData.uid),
-      where('statut', '==', 'confirme')
-    ),
-    (snap) => {
-      state.retraitsConfirmesMembres = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      renderAll();
-    }
-  );
   const unsubInterets = onSnapshot(
     query(collection(db, 'interets_prets_repartis'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
     (snap) => {
@@ -370,6 +354,7 @@ function lancerDashboard() {
       renderAll();
     }
   );
+  // --- NOUVEAU (25 août 2026) : types de contrats ---
   const unsubFraisInscription = onSnapshot(
     query(collection(db, 'frais_inscription'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
     (snap) => {
@@ -402,6 +387,7 @@ function lancerDashboard() {
     }
     renderAll();
   });
+  // --- NOUVEAU (2 sept 2026) : reconductions de contrat à finaliser ---
   const unsubPropositions = onSnapshot(
     query(collection(db, 'propositions_reconduction'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
     (snap) => {
@@ -409,40 +395,11 @@ function lancerDashboard() {
       renderAll();
     }
   );
-  const unsubPropositionsNouveauContrat = onSnapshot(
-    query(collection(db, 'propositions_nouveau_contrat'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
-    (snap) => {
-      state.propositionsNouveauContrat = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      renderAll();
-      // --- NOUVEAU (19 sept 2026) : finalise les adhésions tontine tournante
-      // confirmées par les membres ---
-      finaliserAdhesionsEnAttente(state.propositionsNouveauContrat).catch((err) => console.error(err));
-    }
-  );
-
-  // --- NOUVEAU (19 sept 2026) : tontine tournante (caisses et membres du collecteur) ---
-  const unsubCaissesTournante = onSnapshot(
-    query(collection(db, 'caisses_tournantes'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
-    (snap) => {
-      state.caissesTournante = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      renderAll();
-    },
-    (err) => console.warn('Caisses tournantes :', err)
-  );
-  const unsubMembresTournante = onSnapshot(
-    query(collection(db, 'tournante_membres'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
-    (snap) => {
-      state.membresTournante = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
-      renderAll();
-    },
-    (err) => console.warn('Membres tontine tournante :', err)
-  );
 
   state.unsubscribers.push(
     unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements,
-    unsubRetraits, unsubRetraitsConfirmesMembres, unsubInterets, unsubRetraitsCommission, unsubDiffusions, unsubMesMessages,
-    unsubFraisInscription, unsubDepenses, unsubRedistributions, unsubParametres, unsubPropositions,
-    unsubPropositionsNouveauContrat, unsubCaissesTournante, unsubMembresTournante
+    unsubRetraits, unsubInterets, unsubRetraitsCommission, unsubDiffusions, unsubMesMessages,
+    unsubFraisInscription, unsubDepenses, unsubRedistributions, unsubParametres, unsubPropositions
   );
 }
 
@@ -451,239 +408,97 @@ function renderAll() {
   renderRetraitsMembres();
   renderReconductionsATraiter();
   renderCommunicationCollecteur();
-  renderCaissesTournante();
   renderMembersList();
 }
 
-// ==========================================================
-// --- MODIFIÉ (16 sept 2026) : tableau de bord simplifié à 5 soldes.
-// 1) Solde total d'épargne net = tous les versements - commission
-//    journalière (100%, jour 1) - retraits confirmés des membres.
-// 2) Commission collecteur (30%) et 3) Commission totale (100%) : calculées
-//    uniquement sur les contrats CRÉÉS ce mois-ci.
-// 4) Total collecté = 1 + 3.
-// 5) Épargne nette par type de contrat.
-// En haut du tableau de bord : nombre de contrats actifs/inactifs (réutilise
-// la ligne "collectorStats" déjà présente). Un bouton "HISTORIQUE DES
-// RETRAIT" liste les retraits/prêts confirmés des membres.
-// ==========================================================
-
+// --- Correctif (23 août 2026) : le solde du membre compte tout versement
+// NON ANNULÉ, immédiatement, sans attendre le verrouillage/confirmation du PDG.
 function renderCollecteurHeader() {
   document.getElementById('collectorName').textContent = state.currentCollecteurData.nom || 'Collecteur';
 
-  // --- a) Nombre de contrats actifs / inactifs, en haut du tableau de bord ---
-  const versementsConfirmesTousPourStatut = state.payments.filter((p) => p.statut !== 'annule');
-  const contratsActifsStatut = state.contracts.filter((c) => c.statut === 'actif');
-  let nbActifs = 0;
-  let nbInactifs = 0;
-  contratsActifsStatut.forEach((c) => {
-    const statutCalc = calculerStatutContrat(c, versementsConfirmesTousPourStatut);
-    if (statutCalc === 'inactif') { nbInactifs++; } else { nbActifs++; }
-  });
-  const collectorStatsEl = document.getElementById('collectorStats');
-  if (collectorStatsEl) {
-    collectorStatsEl.textContent = `${nbActifs} contrat(s) actif(s) · ${nbInactifs} inactif(s)`;
-  }
+  const TC = state.payments.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const TV = state.versements.reduce((s, v) => s + Number(v.montant || 0), 0);
 
-  // --- Masque les champs redondants avec les nouveaux soldes simplifiés ---
-  ['commissionConfirmee', 'commissionAttente'].forEach((id) => {
-    const el = document.getElementById(id);
-    if (el && el.parentElement) el.parentElement.style.display = 'none';
-  });
-
-  // --- Calculs des 5 soldes simplifiés ---
-  const soldeTotalEpargneNet = calculerSoldeTotalEpargneNet();
-  const { commissionTotale100, commissionCollecteur30 } = calculerCommissionsMoisEnCours();
-  const totalCollecte = soldeTotalEpargneNet + commissionTotale100;
-
-  // --- Calcul (inchangé) de la commission disponible au retrait, cumulée
-  // depuis le début (nécessaire pour le bouton de demande de retrait) ---
+  const versementsNonAnnules = state.payments.filter((p) => p.statut !== 'annule');
   const versementsConfirmes = state.payments.filter((p) => p.statut === 'confirme');
+  const versementConfirmeTotal = versementsNonAnnules.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const versementNonConfirmeTotal = state.payments.filter((p) => p.statut === 'collecte').reduce((s, p) => s + Number(p.montant || 0), 0);
+
+  const contratsJournaliers = state.contracts.filter((c) => (c.type_contrat || 'journalier') === 'journalier');
+  const contratsConfirmes = contratsJournaliers.filter((c) =>
+    state.payments.some((p) => p.contract_id === c.id && p.jour_numero === 1 && p.statut !== 'annule')
+  ).length;
+
   const commissionsConfirmees = versementsConfirmes.filter((p) => p.jour_numero === 1);
   const totalCommissionConfirmee = commissionsConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
   const commissionInscriptions = totalCommissionConfirmee * TAUX_COMMISSION;
+
+  // Frais d'inscription hebdo/mensuel (part collecteur), déjà calculée à la création
   const fraisInscriptionCollecteur = state.fraisInscriptions.reduce((s, f) => s + Number(f.montant_collecteur || 0), 0);
+
   const commissionInterets = state.interetsPartages.reduce((s, i) => s + Number(i.montant_collecteur || 0), 0);
   const CC = commissionInscriptions + fraisInscriptionCollecteur + commissionInterets;
+
+  const soldeTotalEpargnes = state.contracts
+    .filter((c) => c.statut === 'actif')
+    .reduce((s, c) => s + Math.max(0, calculerEpargneNetteContrat(c)), 0);
+
+  const commissionsNonConfirmees = state.payments.filter((p) => p.statut === 'collecte' && p.jour_numero === 1);
+  const totalCommissionNonConfirmee = commissionsNonConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
+  const commissionEnAttente = totalCommissionNonConfirmee * TAUX_COMMISSION;
+
   const retraitsCommissionConfirmes = state.retraitsCommission.filter((r) => r.statut === 'confirme');
   const retraitsCommissionEnAttente = state.retraitsCommission.filter((r) => r.statut === 'en_attente');
   const totalRetraitCommissionConfirme = retraitsCommissionConfirmes.reduce((s, r) => s + Number(r.montant || 0), 0);
   const totalRetraitCommissionEnAttente = retraitsCommissionEnAttente.reduce((s, r) => s + Number(r.montant || 0), 0);
   const commissionDisponibleRetrait = Math.max(0, CC - totalRetraitCommissionConfirme - totalRetraitCommissionEnAttente);
 
+  document.getElementById('collectorStats').textContent = `${state.contracts.length} contrat(s)`;
+  document.getElementById('commissionConfirmee').textContent = formatGNF(CC);
+  document.getElementById('commissionAttente').textContent = formatGNF(commissionEnAttente);
+
   let situationBloc = document.getElementById('situationGenerale');
   if (!situationBloc) {
     situationBloc = document.createElement('div');
     situationBloc.id = 'situationGenerale';
     situationBloc.innerHTML = `
-      <div class="soldes-row"><span>Solde total d'épargne net : <b id="soldeTotalEpargneNet">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Solde des commissions collecteur (mois en cours, 30%) : <b id="soldeCommissionCollecteurMois">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Commission totale (mois en cours, 100%) : <b id="soldeCommissionTotaleMois">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Total collecté : <b id="soldeTotalCollecte">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Solde total des épargnes (tous types) : <b id="soldeTotalEpargnes">0 GNF</b></span></div>
       <hr style="margin:10px 0; border:none; border-top:1px solid #eee;">
-      <p style="font-weight:bold; margin-bottom:6px;">Épargne nette par type de contrat</p>
-      <div id="soldesParType"></div>
+      <div class="soldes-row"><span>Contrats journaliers confirmés : <b id="nbContratsConfirmes">0</b></span></div>
+      <div class="soldes-row"><span>Versement total comptabilisé : <b id="versementConfirme">0 GNF</b></span></div>
+      <div class="soldes-row"><span>En attente de verrouillage (24h) : <b id="versementNonConfirme">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Total collecté (TC) : <b id="soldeTC">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission inscriptions journalier (30%, verrouillée) : <b id="soldeCommissionInscriptions">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Frais d'inscription hebdo/mensuel (ma part) : <b id="soldeFraisInscription">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission intérêts prêts : <b id="soldeCommissionInterets">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Commission réalisée (total) : <b id="soldeCC">0 GNF</b></span></div>
       <hr style="margin:10px 0; border:none; border-top:1px solid #eee;">
+      <div class="soldes-row"><span>Déjà retiré : <b id="soldeRetraitCommissionConfirme">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Retrait en attente de validation PDG : <b id="soldeRetraitCommissionAttente">0 GNF</b></span></div>
       <div class="soldes-row"><span>Commission disponible au retrait : <b id="soldeCommissionDisponible">0 GNF</b></span></div>
       <button type="button" id="btn-demander-retrait-commission" style="margin-top:10px;">Demander le retrait de ma commission</button>
-      <button type="button" id="btn-historique-retraits" class="secondary" style="margin-top:10px;">HISTORIQUE DES RETRAIT</button>
     `;
     document.getElementById('commissionAttente').closest('.card').appendChild(situationBloc);
     document.getElementById('btn-demander-retrait-commission').addEventListener('click', ouvrirDemandeRetraitCommission);
-    document.getElementById('btn-historique-retraits').addEventListener('click', ouvrirHistoriqueRetraits);
   }
 
-  document.getElementById('soldeTotalEpargneNet').textContent = formatGNF(soldeTotalEpargneNet > 0 ? soldeTotalEpargneNet : 0);
-  document.getElementById('soldeCommissionCollecteurMois').textContent = formatGNF(commissionCollecteur30);
-  document.getElementById('soldeCommissionTotaleMois').textContent = formatGNF(commissionTotale100);
-  document.getElementById('soldeTotalCollecte').textContent = formatGNF(totalCollecte);
+  document.getElementById('soldeTotalEpargnes').textContent = formatGNF(soldeTotalEpargnes > 0 ? soldeTotalEpargnes : 0);
+  document.getElementById('nbContratsConfirmes').textContent = contratsConfirmes;
+  document.getElementById('versementConfirme').textContent = formatGNF(versementConfirmeTotal);
+  document.getElementById('versementNonConfirme').textContent = formatGNF(versementNonConfirmeTotal);
+  document.getElementById('soldeTC').textContent = formatGNF(TC);
+  document.getElementById('soldeCommissionInscriptions').textContent = formatGNF(commissionInscriptions);
+  document.getElementById('soldeFraisInscription').textContent = formatGNF(fraisInscriptionCollecteur);
+  document.getElementById('soldeCommissionInterets').textContent = formatGNF(commissionInterets);
+  document.getElementById('soldeCC').textContent = formatGNF(CC);
+  document.getElementById('soldeRetraitCommissionConfirme').textContent = formatGNF(totalRetraitCommissionConfirme);
+  document.getElementById('soldeRetraitCommissionAttente').textContent = formatGNF(totalRetraitCommissionEnAttente);
   document.getElementById('soldeCommissionDisponible').textContent = formatGNF(commissionDisponibleRetrait);
-  renderSoldesParType();
 
   const btnRetrait = document.getElementById('btn-demander-retrait-commission');
   if (btnRetrait) {
     btnRetrait.disabled = commissionDisponibleRetrait <= 0;
     btnRetrait.dataset.disponible = commissionDisponibleRetrait;
-  }
-}
-
-function estContratDuMoisEnCours(contrat) {
-  if (!contrat || !contrat.date_debut) return false;
-  const d = contrat.date_debut instanceof Date ? contrat.date_debut : new Date(contrat.date_debut);
-  if (isNaN(d.getTime())) return false;
-  const maintenant = new Date();
-  return d.getFullYear() === maintenant.getFullYear() && d.getMonth() === maintenant.getMonth();
-}
-
-// --- NOUVEAU (19 sept 2026) : date (Timestamp Firestore ou texte) dans le mois en cours ---
-function estDuMoisEnCours(dateVal) {
-  if (!dateVal) return false;
-  const d = dateVal.toDate ? dateVal.toDate() : new Date(dateVal);
-  if (isNaN(d.getTime())) return false;
-  const maintenant = new Date();
-  return d.getFullYear() === maintenant.getFullYear() && d.getMonth() === maintenant.getMonth();
-}
-
-function calculerCommissionsMoisEnCours() {
-  const contratsDuMois = state.contracts.filter(estContratDuMoisEnCours);
-  const idsDuMois = new Set(contratsDuMois.map((c) => c.id));
-
-  const jour1DuMois = state.payments.filter(
-    (p) => p.statut === 'confirme' && p.jour_numero === 1 && idsDuMois.has(p.contract_id)
-  );
-  const totalJour1 = jour1DuMois.reduce((s, p) => s + Number(p.montant || 0), 0);
-
-  const fraisDuMois = state.fraisInscriptions.filter((f) => idsDuMois.has(f.contract_id));
-  const totalFrais = fraisDuMois.reduce(
-    (s, f) => s + (Number(f.montant_pdg || 0) + Number(f.montant_collecteur || 0)), 0
-  );
-  const totalFraisCollecteur = fraisDuMois.reduce((s, f) => s + Number(f.montant_collecteur || 0), 0);
-
-  const pretsDuMoisIds = new Set(state.prets.filter((p) => idsDuMois.has(p.contract_id)).map((p) => p.id));
-  const interetsDuMois = state.interetsPartages.filter((i) => pretsDuMoisIds.has(i.pret_id));
-  const totalInterets = interetsDuMois.reduce(
-    (s, i) => s + (Number(i.montant_pdg || 0) + Number(i.montant_collecteur || 0)), 0
-  );
-  const totalInteretsCollecteur = interetsDuMois.reduce((s, i) => s + Number(i.montant_collecteur || 0), 0);
-
-  // --- NOUVEAU (19 sept 2026) : frais et pénalités de la tontine tournante du mois ---
-  const fraisTournanteDuMois = state.fraisInscriptions.filter(
-    (f) => f.source === 'tontine_tournante' && estDuMoisEnCours(f.date)
-  );
-  const totalFraisTournante = fraisTournanteDuMois.reduce(
-    (s, f) => s + (Number(f.montant_pdg || 0) + Number(f.montant_collecteur || 0)), 0
-  );
-  const totalFraisTournanteCollecteur = fraisTournanteDuMois.reduce((s, f) => s + Number(f.montant_collecteur || 0), 0);
-
-  const commissionTotale100 = totalJour1 + totalFrais + totalInterets + totalFraisTournante;
-  const commissionCollecteur30 = totalJour1 * 0.30 + totalFraisCollecteur + totalInteretsCollecteur + totalFraisTournanteCollecteur;
-
-  return { commissionTotale100, commissionCollecteur30 };
-}
-
-function calculerSoldeTotalEpargneNet() {
-  const TC = state.payments.filter((p) => p.statut !== 'annule').reduce((s, p) => s + Number(p.montant || 0), 0);
-  const commissionJournalierTotale = state.payments
-    .filter((p) => p.statut === 'confirme' && p.jour_numero === 1)
-    .reduce((s, p) => s + Number(p.montant || 0), 0);
-  const retraitsConfirmesTotal = state.retraitsConfirmesMembres.reduce((s, r) => s + Number(r.montant || 0), 0);
-  return TC - commissionJournalierTotale - retraitsConfirmesTotal;
-}
-
-function calculerEpargneNetteParType(typeContratCle) {
-  const contrats = state.contracts.filter((c) => (c.type_contrat || 'journalier') === typeContratCle);
-  return contrats.reduce((s, c) => s + Math.max(0, calculerEpargneNetteContrat(c)), 0);
-}
-
-function renderSoldesParType() {
-  const container = document.getElementById('soldesParType');
-  if (!container) return;
-  const types = ['journalier', 'hebdomadaire', 'mensuel'];
-  container.innerHTML = types.map((t) => {
-    const infoType = infoTypeContrat(t);
-    const montant = calculerEpargneNetteParType(t);
-    return `<div class="soldes-row"><span>${infoType.label} : <b>${formatGNF(montant)}</b></span></div>`;
-  }).join('');
-}
-
-// ==========================================================
-// --- NOUVEAU (16 sept 2026) : bouton "HISTORIQUE DES RETRAIT" — liste des
-// membres ayant effectué un retrait ou un prêt confirmé, avec date et
-// montant.
-// ==========================================================
-function ouvrirHistoriqueRetraits() {
-  const items = [...state.retraitsConfirmesMembres].sort(
-    (a, b) => (b.date_confirmation?.toMillis?.() || b.dateCreation?.toMillis?.() || 0)
-      - (a.date_confirmation?.toMillis?.() || a.dateCreation?.toMillis?.() || 0)
-  );
-  const html = `
-    <h2>Historique des retraits et prêts</h2>
-    <p class="subtitle-sm">Membres ayant effectué un retrait ou obtenu un prêt (confirmés).</p>
-    <div style="max-height:340px; overflow-y:auto; margin-top:10px;">
-      ${items.length === 0 ? '<p style="color:#999; font-size:13px;">Aucun retrait ou prêt confirmé pour le moment.</p>' : items.map((r) => {
-        const libelle = libelleTypeRetrait(r.type);
-        const dateAffichee = formatDateHeure(r.date_confirmation || r.dateCreation);
-        return `
-          <div class="retrait-row">
-            <div class="retrait-row-top">
-              <div>
-                <strong>${r.memberName || 'Membre'}</strong><br>
-                <small>${libelle}</small><br>
-                <small style="color:#999;">${dateAffichee}</small>
-              </div>
-              <span class="badge attente">${formatGNF(r.montant)}</span>
-            </div>
-          </div>
-        `;
-      }).join('')}
-    </div>
-    <div class="modal-actions" style="margin-top:14px;">
-      <button type="button" class="secondary" id="modal-fermer-historique" style="flex:1;">Fermer</button>
-    </div>
-  `;
-  ouvrirModal(html);
-  document.getElementById('modal-fermer-historique').addEventListener('click', fermerModal);
-}
-
-// ==========================================================
-// --- NOUVEAU (16 sept 2026) : b) compteur du nombre total de membres,
-// affiché entre parenthèses après le texte "Mes membres". Sans accès au
-// HTML, on cherche l'élément par correspondance exacte de son texte.
-// --- MODIFIÉ (19 sept 2026) : compte aussi les membres de tontine tournante.
-// ==========================================================
-function mettreAJourCompteurMembres() {
-  const nombreMembresTotal = new Set(
-    [...state.contracts.map((c) => c.membre_id), ...state.membresTournante.map((m) => m.membre_uid)].filter(Boolean)
-  ).size;
-  const elements = document.querySelectorAll('h1, h2, h3, h4, span, p, strong, b, div, button, a');
-  for (const el of elements) {
-    if (el.children.length === 0) {
-      const texte = el.textContent.trim();
-      if (texte === 'Mes membres' || /^Mes membres \(\d+\)$/.test(texte)) {
-        el.textContent = `Mes membres (${nombreMembresTotal})`;
-        return;
-      }
-    }
   }
 }
 
@@ -778,6 +593,15 @@ function renderRetraitsMembres() {
     });
 }
 
+// ==========================================================
+// --- NOUVEAU (2 sept 2026) : reconductions de contrat à finaliser ---
+// Après un retrait_final confirmé (Cas 4, clôture), une proposition de
+// reconduction est créée pour le membre. Une fois qu'il a répondu
+// ("reconduit_meme_termes" ou "reconduit_modifie"), elle apparaît ici pour
+// que le collecteur crée réellement le nouveau contrat + le versement jour 1
+// au moment où il encaisse la 1ère cotisation en personne.
+// ==========================================================
+
 function renderReconductionsATraiter() {
   const enAttenteTraitement = state.propositionsReconduction.filter(
     (p) => p.statut === 'reconduit_meme_termes' || p.statut === 'reconduit_modifie'
@@ -831,6 +655,10 @@ function renderReconductionsATraiter() {
   });
 }
 
+// === CORRECTIF : le champ "commission" séparé a été supprimé. Pour un
+// contrat journalier, le jour 1 est désormais TOUJOURS égal au montant du
+// versement choisi — prélevé automatiquement, sans saisie manuelle
+// distincte (source du bug de commission manquante lors des reconductions).
 function ouvrirFinalisationReconduction(propositionId) {
   const proposition = state.propositionsReconduction.find((p) => p.id === propositionId);
   if (!proposition) return;
@@ -901,6 +729,9 @@ async function confirmerRetraitMembre(demande) {
         statut: 'cloture',
         epargne_soldee: true,
       });
+      // --- NOUVEAU (2 sept 2026) : création de la proposition de reconduction ---
+      // Manquait jusqu'ici — sans ce document, le membre ne voyait jamais la
+      // proposition "voulez-vous reconduire ?" et aucun renouvellement n'était possible.
       const contratCloture = state.contracts.find((c) => c.id === demande.contractId);
       await addDoc(collection(db, 'propositions_reconduction'), {
         membre_id: demande.memberId,
@@ -960,40 +791,6 @@ async function rejeterRetraitMembre(demande) {
   }
 }
 
-// ==========================================================
-// --- NOUVEAU (13 sept 2026) : bouton "COMMUNICATION" créé en JS.
-// Masque par défaut les diffusions du PDG, le fil de messages privés et le
-// formulaire de réponse. Un clic sur le bouton affiche/masque ces zones.
-// ==========================================================
-function initialiserBoutonCommunication() {
-  if (document.getElementById('btn-communication')) return;
-  const ids = ['diffusionsCollecteurList', 'filPdgMessages', 'form-message-pdg'];
-  const cartes = [];
-  ids.forEach((id) => {
-    const el = document.getElementById(id);
-    if (!el) return;
-    const carte = el.closest('.card') || el.parentElement;
-    if (carte && !cartes.includes(carte)) cartes.push(carte);
-  });
-  if (cartes.length === 0) return;
-
-  cartes.forEach((c) => c.classList.add('hidden'));
-
-  const btn = document.createElement('button');
-  btn.type = 'button';
-  btn.id = 'btn-communication';
-  btn.textContent = 'COMMUNICATION';
-  btn.style.width = '100%';
-  btn.style.marginBottom = '10px';
-  btn.style.background = '#0d6efd';
-  btn.style.color = 'white';
-  btn.addEventListener('click', () => {
-    const masque = cartes[0].classList.contains('hidden');
-    cartes.forEach((c) => c.classList.toggle('hidden', !masque));
-  });
-  cartes[0].insertAdjacentElement('beforebegin', btn);
-}
-
 function renderCommunicationCollecteur() {
   renderDiffusionsCollecteur();
   renderFilPdg();
@@ -1051,11 +848,6 @@ function renderFilPdg() {
     }
   }
 
-  const btnCommunication = document.getElementById('btn-communication');
-  if (btnCommunication) {
-    btnCommunication.style.background = nonLus.length > 0 ? '#198754' : '#0d6efd';
-  }
-
   nonLus.forEach(async (m) => {
     try {
       await updateDoc(doc(db, 'messages_prives', m.id), { lu_participant: true });
@@ -1089,6 +881,16 @@ document.getElementById('form-message-pdg').addEventListener('submit', async (e)
     notifier('Erreur : ' + err.message, 'erreur');
   }
 });
+
+// ==========================================================
+// --- NOUVEAU (25 août 2026) : calculs généralisés par type de contrat ---
+// Journalier : jour_numero === 1 est la commission (exclue de l'épargne nette).
+// Hebdomadaire / Mensuel : pas de "jour 1 = frais" — tous les versements
+// périodiques comptent en épargne nette ; le frais d'inscription est un
+// document séparé (collection frais_inscription), pas un versement.
+// Les dépenses non compensées diminuent l'épargne nette ; les redistributions
+// reçues l'augmentent.
+// ==========================================================
 
 function calculerEpargneNetteContrat(contrat) {
   const typeContrat = contrat.type_contrat || 'journalier';
@@ -1134,189 +936,25 @@ function trouverContratsNonSoldes(membreId, contratExclureId) {
     !c.epargne_soldee
   );
 }
-// === FIN COLLECTEUR — PARTIE 1/2 ===// === COLLECTEUR — PARTIE 2/2 ===
-
-// ==========================================================
-// --- NOUVEAU (19 sept 2026) : TONTINE TOURNANTE côté collecteur ---
-// ==========================================================
-let caissesOuvertesCache = [];
-
-function renderCaissesTournante() {
-  let zone = document.getElementById('caissesTournanteZone');
-  if (!zone) {
-    const listeEl = document.getElementById('membersList');
-    const carteMembres = listeEl ? listeEl.closest('.card') : null;
-    if (!carteMembres) return;
-    zone = document.createElement('div');
-    zone.id = 'caissesTournanteZone';
-    zone.className = 'card';
-    carteMembres.insertAdjacentElement('beforebegin', zone);
-  }
-
-  if (state.caissesTournante.length === 0) {
-    zone.style.display = 'none';
-    zone.innerHTML = '';
-    return;
-  }
-  zone.style.display = '';
-
-  const caisses = [...state.caissesTournante].sort(
-    (a, b) => String(a.nom || '').localeCompare(String(b.nom || ''), 'fr')
-  );
-  zone.innerHTML = `
-    <h3>Mes caisses tournantes</h3>
-    <p style="color:#666; font-size:13px; margin-top:4px;">Caisses dont vous êtes le collecteur.</p>
-    <div style="margin-top:8px;">
-      ${caisses.map((c) => {
-        const nb = state.membresTournante.filter((m) => m.caisse_id === c.id).length;
-        const texteStatut = c.statut === 'inscriptions'
-          ? `Inscriptions jusqu'au ${formatDate(c.date_limite_inscription)}`
-          : c.statut === 'en_cours' ? `Tour ${c.tour_actuel}/${c.nb_tours}` : 'Clôturée';
-        const classe = c.statut === 'en_cours' ? 'ok' : c.statut === 'inscriptions' ? 'due' : 'attente';
-        return `
-          <div class="member-row">
-            <div>
-              <strong>${esc(c.nom)}</strong><br>
-              <small>${esc(PERIODICITES[c.periodicite] || '')} · cotisation ${formatGNF(c.montant_cotisation)} · ${nb} membre(s)</small>
-            </div>
-            <span class="badge ${classe}">${esc(texteStatut)}</span>
-          </div>
-        `;
-      }).join('')}
-    </div>
-  `;
-}
-
-function construireLigneTournante(m, afficherBoutonNouveauContrat) {
-  const caisse = state.caissesTournante.find((c) => c.id === m.caisse_id);
-  const arriere = (m.arrieres || []).reduce((s, a) => s + Number(a.montant || 0), 0);
-  const texteRang = m.rang
-    ? `Tour ${m.rang}${caisse && caisse.nb_tours ? '/' + caisse.nb_tours : ''}`
-    : 'en attente du démarrage';
-  const classeStatut = !caisse ? 'attente' : caisse.statut === 'en_cours' ? 'ok' : caisse.statut === 'inscriptions' ? 'due' : 'attente';
-  const texteStatut = !caisse ? '—' : libelleStatutCaisse(caisse.statut);
-
-  const row = document.createElement('div');
-  row.className = 'member-row';
-  row.innerHTML = `
-    <div>
-      <strong style="cursor:pointer; text-decoration:underline;">${esc(m.nom)}</strong>
-      <span class="badge" style="background:#e9ecef; color:#333; margin-left:6px;">${infoTypeContrat('tournante').label}</span><br>
-      <small>${esc(caisse ? caisse.nom : 'Caisse')} · ${texteRang}</small>
-      ${caisse ? `<br><small>Cotisation : ${formatGNF(caisse.montant_cotisation)}</small>` : ''}
-      ${arriere > 0 ? `<br><small style="color:#c0392b; font-weight:bold;">Arriéré à rattraper : ${formatGNF(arriere)}</small>` : ''}
-    </div>
-    <div style="text-align:right;">
-      <span class="badge ${classeStatut}">${esc(texteStatut)}</span><br>
-      ${afficherBoutonNouveauContrat ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#198754;" data-nouveau-contrat="${esc(m.membre_uid)}">Nouveau contrat</button>` : ''}
-    </div>
-  `;
-  row.querySelector('strong').addEventListener('click', () => afficherDetailsTournante(m));
-  const btnNouveau = row.querySelector('button[data-nouveau-contrat]');
-  if (btnNouveau) {
-    btnNouveau.addEventListener('click', () => ouvrirNouveauContrat(m.membre_uid, m.nom));
-  }
-  return row;
-}
-
-async function afficherDetailsTournante(m) {
-  const caisse = state.caissesTournante.find((c) => c.id === m.caisse_id);
-  let solde = 0;
-  let operations = [];
-  try {
-    const r = await chargerSoldeSecurite(m.id);
-    solde = r.solde;
-    operations = r.operations;
-  } catch (err) {
-    console.error(err);
-  }
-  const arriere = (m.arrieres || []).reduce((s, a) => s + Number(a.montant || 0), 0);
-
-  ouvrirModal(`
-    <h2>${esc(m.nom)}</h2>
-    <p class="subtitle-sm">Téléphone : ${esc(m.telephone || '—')} · ${esc(caisse ? caisse.nom : 'Caisse')} · ${infoTypeContrat('tournante').label}</p>
-    <div class="soldes-row"><span>Cotisation : <b>${formatGNF(caisse ? caisse.montant_cotisation : 0)}</b></span></div>
-    <div class="soldes-row"><span>Rang de passage : <b>${m.rang ? 'Tour ' + m.rang : 'pas encore défini'}</b></span></div>
-    <div class="soldes-row"><span>Solde de sécurité : <b style="${solde < 0 ? 'color:#c0392b;' : ''}">${formatGNF(solde)}</b></span></div>
-    ${arriere > 0 ? `<div class="soldes-row"><span style="color:#c0392b;">Arriéré à rattraper : <b>${formatGNF(arriere)}</b></span></div>` : ''}
-    <h2 style="margin-top:14px; font-size:15px;">Mouvements du solde de sécurité</h2>
-    <div style="max-height:200px; overflow-y:auto; margin-top:6px;">
-      ${operations.length === 0
-        ? '<p style="color:#999; font-size:13px;">Aucun mouvement.</p>'
-        : operations.slice(0, 15).map((o) => `
-            <div class="soldes-row"><span>${formatDateHeure(o.date)} — ${esc(o.libelle || '')}</span><span style="${Number(o.montant) < 0 ? 'color:#c0392b;' : 'color:#198754;'}">${formatGNF(o.montant)}</span></div>
-          `).join('')}
-    </div>
-    <div class="modal-actions">
-      <button type="button" class="secondary" id="modal-fermer-details-tt" style="flex:1;">Fermer</button>
-    </div>
-  `);
-  document.getElementById('modal-fermer-details-tt').addEventListener('click', fermerModal);
-}
-
-// Remplit la liste des caisses ouvertes aux inscriptions dans un <select>
-async function chargerCaissesDansSelect(selectId, infoId) {
-  const select = document.getElementById(selectId);
-  if (!select) return;
-  select.innerHTML = '<option value="">Chargement…</option>';
-  try {
-    caissesOuvertesCache = await listerCaissesOuvertes(state.currentCollecteurData.uid);
-  } catch (err) {
-    console.error(err);
-    caissesOuvertesCache = [];
-  }
-  const selectApres = document.getElementById(selectId);
-  const info = document.getElementById(infoId);
-  if (!selectApres) return; // fenêtre fermée entre-temps
-  if (caissesOuvertesCache.length === 0) {
-    selectApres.innerHTML = '<option value="">Aucune caisse ouverte</option>';
-    if (info) info.textContent = "Aucune caisse tournante n'est ouverte aux inscriptions. Le PDG doit en créer une pour votre compte.";
-    return;
-  }
-  selectApres.innerHTML = caissesOuvertesCache
-    .map((c) => `<option value="${esc(c.id)}">${esc(c.nom)} — cotisation ${formatGNF(c.montant_cotisation)}</option>`)
-    .join('');
-  selectApres.addEventListener('change', () => majInfoCaisse(selectId, infoId));
-  majInfoCaisse(selectId, infoId);
-}
-
-function majInfoCaisse(selectId, infoId) {
-  const select = document.getElementById(selectId);
-  const info = document.getElementById(infoId);
-  if (!select || !info) return;
-  const caisse = caissesOuvertesCache.find((c) => c.id === select.value);
-  info.textContent = caisse
-    ? `Caution : ${formatGNF(caisse.montant_caution)} dont ${formatGNF(caisse.frais_inscription)} de frais d'inscription (enregistrés automatiquement). Inscriptions jusqu'au ${formatDate(caisse.date_limite_inscription)}.`
-    : '';
-}
 
 function renderMembersList() {
   const container = document.getElementById('membersList');
   container.innerHTML = '';
 
-  // --- NOUVEAU (16 sept 2026) : met à jour "Mes membres (N)" à chaque rendu ---
-  mettreAJourCompteurMembres();
-
   const versementsConfirmesTous = state.payments.filter((p) => p.statut !== 'annule');
 
-  const contratsActifsTous = state.contracts.filter((c) => c.statut === 'actif');
-  const membresAvecActif = new Set(contratsActifsTous.map((c) => c.membre_id));
-
-  const dernierClotureParMembre = {};
+  const contratsParMembre = {};
   state.contracts
-    .filter((c) => c.statut === 'cloture' && !membresAvecActif.has(c.membre_id))
+    .filter((c) => c.statut === 'actif' || c.statut === 'cloture')
     .forEach((c) => {
-      const existant = dernierClotureParMembre[c.membre_id];
+      const existant = contratsParMembre[c.membre_id];
       if (!existant || (c.date_debut || '') > (existant.date_debut || '')) {
-        dernierClotureParMembre[c.membre_id] = c;
+        contratsParMembre[c.membre_id] = c;
       }
     });
+  const contratsAffiches = Object.values(contratsParMembre);
 
-  const contratsAffiches = [...contratsActifsTous, ...Object.values(dernierClotureParMembre)]
-    .sort((a, b) => (a.membre_nom || '').localeCompare(b.membre_nom || '', 'fr'));
-
-  // --- MODIFIÉ (19 sept 2026) : les membres de tontine tournante comptent aussi ---
-  if (contratsAffiches.length === 0 && state.membresTournante.length === 0) {
+  if (contratsAffiches.length === 0) {
     container.innerHTML = '<p style="color:#999;">Aucun membre assigné.</p>';
     return;
   }
@@ -1342,12 +980,6 @@ function renderMembersList() {
     const depensesNonCompensees = state.depenses.filter((d) => d.contract_id === contrat.id && !d.compensee);
     const totalDepensesNonCompensees = depensesNonCompensees.reduce((s, d) => s + Number(d.montant || 0), 0);
 
-    const propositionsMembre = state.propositionsNouveauContrat.filter((p) => p.membre_id === contrat.membre_id);
-    const propositionEnAttente = propositionsMembre.find((p) => p.statut === 'en_attente');
-    const propositionRefusee = propositionsMembre
-      .filter((p) => p.statut === 'refuse')
-      .sort((a, b) => (b.date_reponse?.toMillis?.() || 0) - (a.date_reponse?.toMillis?.() || 0))[0];
-
     const row = document.createElement('div');
     row.className = 'member-row';
     row.innerHTML = `
@@ -1358,15 +990,15 @@ function renderMembersList() {
         ${pret ? `<br><small style="color:#c0392b;">Prêt en cours : ${formatGNF(calculerMontantDuPret(pret))} · Solde disponible : ${formatGNF(soldeDisponible)}</small>` : ''}
         ${totalNonSolde > 0 ? `<br><small style="color:#c0392b; font-weight:bold;">Contrat non soldé : ${formatGNF(totalNonSolde)}</small>` : ''}
         ${totalDepensesNonCompensees > 0 ? `<br><small style="color:#e67e22; font-weight:bold;">Dépenses non compensées : ${formatGNF(totalDepensesNonCompensees)}</small>` : ''}
-        ${propositionEnAttente ? `<br><small style="color:#e67e22;">Nouveau contrat proposé (${infoTypeContrat(propositionEnAttente.type_contrat || 'journalier').label}) — en attente de confirmation du membre</small>` : ''}
-        ${!propositionEnAttente && propositionRefusee ? `<br><small style="color:#c0392b;">Dernière proposition de nouveau contrat refusée par le membre</small>` : ''}
       </div>
       <div style="text-align:right;">
         <span class="badge ${statut.classe}">${statut.texte}</span><br>
-        ${!estCloture ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px;"
-              data-contrat="${contrat.id}">Encaisser</button>` : ''}
-        <button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#198754;"
-              data-nouveau-contrat="${contrat.membre_id}" data-nom="${contrat.membre_nom || 'Membre'}">Nouveau contrat</button>
+        ${estCloture
+          ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#198754;"
+              data-nouveau-contrat="${contrat.membre_id}" data-nom="${contrat.membre_nom || 'Membre'}">Nouveau contrat</button>`
+          : `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px;"
+              data-contrat="${contrat.id}">Encaisser</button>`
+        }
         ${pret ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#c0392b;"
           data-pret="${pret.id}">Rembourser prêt</button>` : ''}
         ${(typeContrat === 'hebdomadaire' || typeContrat === 'mensuel') && !estCloture ? `<button style="margin-top:6px; width:auto; padding:6px 10px; font-size:13px; background:#e67e22;"
@@ -1398,14 +1030,6 @@ function renderMembersList() {
     }
     container.appendChild(row);
   });
-
-  // --- NOUVEAU (19 sept 2026) : lignes des membres de tontine tournante ---
-  const idsAvecContrat = new Set(contratsAffiches.map((c) => c.membre_id));
-  [...state.membresTournante]
-    .sort((a, b) => String(a.nom || '').localeCompare(String(b.nom || ''), 'fr'))
-    .forEach((m) => {
-      container.appendChild(construireLigneTournante(m, !idsAvecContrat.has(m.membre_uid)));
-    });
 }
 
 function getStatutContrat(contrat, versements) {
@@ -1490,10 +1114,12 @@ async function enregistrerVersement(contrat, montantSaisi, periodeDepart, period
   }
 }
 
+// === CORRECTIF : signature réduite à (typeContrat, labelMontantId, champFraisId) —
+// le champ "commission" séparé n'existe plus nulle part dans l'app.
 function ouvrirNouveauContrat(membreId, membreNom) {
   ouvrirModal(`
     <h2>Nouveau contrat — ${membreNom}</h2>
-    <p class="subtitle-sm">Ce contrat s'ajoutera aux contrats déjà en cours de ce membre (superposition) une fois qu'il l'aura <b>confirmé</b>. Il peut aussi le <b>rejeter</b>. Pour un contrat journalier, le 1er versement (jour 1) sera automatiquement prélevé comme commission.</p>
+    <p class="subtitle-sm">Choisissez le type de contrat et démarrez-le. Pour un contrat journalier, le 1er versement (jour 1) est automatiquement prélevé comme commission (frais d'entretien du compte) — pas de saisie séparée.</p>
     <form id="form-nouveau-contrat">
       <div class="field-row">
         <label>Type de contrat</label>
@@ -1501,13 +1127,7 @@ function ouvrirNouveauContrat(membreId, membreNom) {
           <option value="journalier">${TYPES_CONTRAT.journalier.label}</option>
           <option value="hebdomadaire">${TYPES_CONTRAT.hebdomadaire.label}</option>
           <option value="mensuel">${TYPES_CONTRAT.mensuel.label}</option>
-          <option value="tournante">${TYPES_CONTRAT.tournante.label}</option>
         </select>
-      </div>
-      <div class="field-row hidden" id="champ-caisse-nc">
-        <label>Caisse tournante</label>
-        <select name="caisseId" id="select-caisse-nc"></select>
-        <small id="info-caisse-nc" style="color:#666;"></small>
       </div>
       <div class="field-row">
         <label id="label-montant-periode-nc">Montant du versement quotidien (GNF)</label>
@@ -1519,13 +1139,12 @@ function ouvrirNouveauContrat(membreId, membreNom) {
       </div>
       <div class="modal-actions">
         <button type="button" class="secondary" id="modal-annuler-nouveau-contrat" style="flex:1;">Annuler</button>
-        <button type="submit" style="flex:1;">Envoyer la proposition au membre</button>
+        <button type="submit" style="flex:1;">Créer le contrat</button>
       </div>
     </form>
   `);
   document.getElementById('select-type-contrat-nc').addEventListener('change', (e) => {
-    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nc', 'champ-frais-inscription-nc', 'champ-caisse-nc');
-    if (e.target.value === 'tournante') chargerCaissesDansSelect('select-caisse-nc', 'info-caisse-nc');
+    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nc', 'champ-frais-inscription-nc');
   });
   document.getElementById('modal-annuler-nouveau-contrat').addEventListener('click', fermerModal);
   document.getElementById('form-nouveau-contrat').addEventListener('submit', async (e) => {
@@ -1536,45 +1155,14 @@ function ouvrirNouveauContrat(membreId, membreNom) {
     const fraisInscription = Number(fd.get('fraisInscription') || 0);
 
     try {
-      // --- NOUVEAU (19 sept 2026) : proposition d'adhésion à une caisse tournante ---
-      if (typeContrat === 'tournante') {
-        const caisse = caissesOuvertesCache.find((c) => c.id === fd.get('caisseId'));
-        if (!caisse) {
-          notifier('Choisissez une caisse tournante ouverte aux inscriptions.', 'erreur');
-          return;
-        }
-        if (state.membresTournante.some((m) => m.membre_uid === membreId && m.caisse_id === caisse.id)) {
-          notifier('Ce membre est déjà inscrit dans cette caisse.', 'erreur');
-          return;
-        }
-        await addDoc(collection(db, 'propositions_nouveau_contrat'), {
-          membre_id: membreId,
-          membre_nom: membreNom,
-          collecteur_id: state.currentCollecteurData.uid,
-          type_contrat: 'tournante',
-          montant_periode: caisse.montant_cotisation,
-          frais_inscription: caisse.frais_inscription,
-          caisse_id: caisse.id,
-          caisse_nom: caisse.nom,
-          statut: 'en_attente',
-          date: serverTimestamp(),
-        });
-        notifier('Proposition d\'adhésion envoyée au membre.', 'succes');
-        fermerModal();
-        return;
-      }
-
-      await addDoc(collection(db, 'propositions_nouveau_contrat'), {
-        membre_id: membreId,
-        membre_nom: membreNom,
-        collecteur_id: state.currentCollecteurData.uid,
-        type_contrat: typeContrat,
-        montant_periode: montantPeriode,
-        frais_inscription: fraisInscription,
-        statut: 'en_attente',
-        date: serverTimestamp(),
+      await creerContratEtPremierePeriode({
+        membreId,
+        membreNom,
+        typeContrat,
+        montantPeriode,
+        fraisInscription,
       });
-      notifier('Proposition de nouveau contrat envoyée au membre.', 'succes');
+      notifier('Nouveau contrat créé.', 'succes');
       fermerModal();
     } catch (err) {
       console.error(err);
@@ -1583,30 +1171,12 @@ function ouvrirNouveauContrat(membreId, membreNom) {
   });
 }
 
-// --- MODIFIÉ (19 sept 2026) : gère aussi le type "tournante" (champ caisse à la place
-// du montant). Comportement des autres types inchangé. ---
-function basculerChampsTypeContrat(typeContrat, labelMontantId, champFraisId, champCaisseId) {
-  const labelMontant = document.getElementById(labelMontantId);
-  const champMontant = labelMontant ? labelMontant.closest('.field-row') : null;
-  const champFrais = document.getElementById(champFraisId);
-  const champCaisse = champCaisseId ? document.getElementById(champCaisseId) : null;
-  const estTournante = typeContrat === 'tournante';
-
-  if (champMontant) {
-    champMontant.classList.toggle('hidden', estTournante);
-    const saisieMontant = champMontant.querySelector('input');
-    if (saisieMontant) saisieMontant.required = !estTournante;
-  }
-  if (champCaisse) champCaisse.classList.toggle('hidden', !estTournante);
-
-  if (estTournante) {
-    champFrais.classList.add('hidden');
-    champFrais.querySelector('input').required = false;
-    return;
-  }
-
+// === CORRECTIF : ne gère plus que le champ "frais d'inscription" (hebdo/mensuel).
+// Le champ "commission" séparé (journalier) a été supprimé partout.
+function basculerChampsTypeContrat(typeContrat, labelMontantId, champFraisId) {
   const infoType = infoTypeContrat(typeContrat);
-  labelMontant.textContent = `Montant du ${infoType.labelVersement} (GNF)`;
+  document.getElementById(labelMontantId).textContent = `Montant du ${infoType.labelVersement} (GNF)`;
+  const champFrais = document.getElementById(champFraisId);
   if (typeContrat === 'journalier') {
     champFrais.classList.add('hidden');
     champFrais.querySelector('input').required = false;
@@ -1616,6 +1186,10 @@ function basculerChampsTypeContrat(typeContrat, labelMontantId, champFraisId, ch
   }
 }
 
+// === CORRECTIF : suppression du paramètre "commission" — pour un contrat
+// journalier, la commission du jour 1 = automatiquement le montant de la
+// cotisation journalière choisie (montantPeriode), plus aucune saisie
+// manuelle séparée possible.
 async function creerContratEtPremierePeriode({ membreId, membreNom, typeContrat, montantPeriode, fraisInscription }) {
   const infoType = infoTypeContrat(typeContrat);
   const contratData = {
@@ -1662,6 +1236,10 @@ async function creerContratEtPremierePeriode({ membreId, membreNom, typeContrat,
 
   return contratRef;
 }
+
+// ==========================================================
+// --- NOUVEAU (25 août 2026) : gestion des dépenses (hebdo/mensuel) ---
+// ==========================================================
 
 function ouvrirNouvelleDepense(contrat) {
   ouvrirModal(`
@@ -1750,6 +1328,10 @@ function ouvrirCompensationDepenses(contrat, totalNonCompense, depensesNonCompen
   });
 }
 
+// Compense les dépenses les plus anciennes en premier, jusqu'à épuisement
+// du montant versé. Une dépense partiellement compensée reste non compensée
+// pour son reliquat (nouvelle ligne de dépense pour le reliquat, l'originale
+// passe compensee=true pour la part couverte).
 async function enregistrerCompensationDepenses(depensesNonCompensees, montantVerse) {
   let restant = montantVerse;
   const triees = [...depensesNonCompensees].sort((a, b) => (a.date_depense || '').localeCompare(b.date_depense || ''));
@@ -1765,6 +1347,8 @@ async function enregistrerCompensationDepenses(depensesNonCompensees, montantVer
       });
       restant -= montantDepense;
     } else {
+      // Compensation partielle : on clôture la ligne d'origine pour la part
+      // couverte et on recrée une ligne pour le reliquat non compensé.
       await updateDoc(doc(db, 'depenses', d.id), {
         compensee: true,
         date_compensation: serverTimestamp(),
@@ -1787,6 +1371,7 @@ async function enregistrerCompensationDepenses(depensesNonCompensees, montantVer
   }
 }
 
+// === CORRECTIF : champ "commission" séparé supprimé du formulaire nouveau membre.
 document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
   ouvrirModal(`
     <h2>Nouveau membre</h2>
@@ -1814,13 +1399,7 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
             <option value="journalier">${TYPES_CONTRAT.journalier.label}</option>
             <option value="hebdomadaire">${TYPES_CONTRAT.hebdomadaire.label}</option>
             <option value="mensuel">${TYPES_CONTRAT.mensuel.label}</option>
-            <option value="tournante">${TYPES_CONTRAT.tournante.label}</option>
           </select>
-        </div>
-        <div class="field-row hidden" id="champ-caisse-nm">
-          <label>Caisse tournante</label>
-          <select name="caisseId" id="select-caisse-nm"></select>
-          <small id="info-caisse-nm" style="color:#666;"></small>
         </div>
         <div class="field-row">
           <label id="label-montant-periode-nm">Montant du versement quotidien (GNF)</label>
@@ -1837,8 +1416,7 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
       </form>
   `);
   document.getElementById('select-type-contrat-nm').addEventListener('change', (e) => {
-    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nm', 'champ-frais-inscription-nm', 'champ-caisse-nm');
-    if (e.target.value === 'tournante') chargerCaissesDansSelect('select-caisse-nm', 'info-caisse-nm');
+    basculerChampsTypeContrat(e.target.value, 'label-montant-periode-nm', 'champ-frais-inscription-nm');
   });
   document.getElementById('modal-annuler-membre').addEventListener('click', fermerModal);
   document.getElementById('form-nouveau-membre').addEventListener('submit', async (e) => {
@@ -1853,16 +1431,6 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
     const montantPeriode = Number(fd.get('montantPeriode'));
     const fraisInscription = Number(fd.get('fraisInscription') || 0);
 
-    // --- NOUVEAU (19 sept 2026) : caisse tournante choisie (vérifiée avant de créer le compte) ---
-    let caisseChoisie = null;
-    if (typeContrat === 'tournante') {
-      caisseChoisie = caissesOuvertesCache.find((c) => c.id === fd.get('caisseId')) || null;
-      if (!caisseChoisie) {
-        notifier('Choisissez une caisse tournante ouverte aux inscriptions.', 'erreur');
-        return;
-      }
-    }
-
     try {
       const emailTechnique = telephoneVersEmailTechnique(telephone);
       const uid = await creerCompteSecondaire(emailTechnique, password);
@@ -1875,17 +1443,13 @@ document.getElementById('nouveauMembreBtn').addEventListener('click', () => {
         date_creation: serverTimestamp(),
       });
 
-      if (typeContrat === 'tournante') {
-        await adhererCaisse({ caisse: caisseChoisie, membreUid: uid, membreNom: nom, membreTelephone: telephone });
-      } else {
-        await creerContratEtPremierePeriode({
-          membreId: uid,
-          membreNom: nom,
-          typeContrat,
-          montantPeriode,
-          fraisInscription,
-        });
-      }
+      await creerContratEtPremierePeriode({
+        membreId: uid,
+        membreNom: nom,
+        typeContrat,
+        montantPeriode,
+        fraisInscription,
+      });
 
       fermerModal();
       afficherIdentifiants({ nom, telephone, password });
@@ -1954,6 +1518,7 @@ function afficherIdentifiants(data) {
   carte.querySelector('#fermer-identifiants').addEventListener('click', () => overlay.remove());
 }
 
+// --- Correctif (23 août 2026) : versement comptabilisé = tout ce qui n'est pas annulé.
 async function afficherDetailsMembre(contrat) {
   const typeContrat = contrat.type_contrat || 'journalier';
   const infoType = infoTypeContrat(typeContrat);
@@ -2022,6 +1587,15 @@ function ouvrirRemboursementPret(pretId) {
   }
   enregistrerRemboursement(pret, montantNum, montantDu);
 }
+
+// ==========================================================
+// --- NOUVEAU (25 août 2026) : répartition d'intérêt généralisée ---
+// Journalier : 70% PDG / 30% collecteur (fixe, historique).
+// Hebdomadaire / Mensuel : %PDG / %collecteur / %redistribution réglés
+// par le PDG (state.parametresInterets). La part "redistribution" est
+// répartie immédiatement entre les membres à contrat annuel actif DU MÊME
+// COLLECTEUR, au prorata de leur cotisation périodique.
+// ==========================================================
 
 async function enregistrerRemboursement(pret, montant, montantDuAvant) {
   try {
@@ -2098,6 +1672,9 @@ async function enregistrerRemboursement(pret, montant, montantDuAvant) {
   }
 }
 
+// Répartit un montant entre les membres à contrat hebdo/mensuel actif DU MÊME
+// COLLECTEUR que le prêt d'origine (pas tous les collecteurs de l'entreprise),
+// au prorata de leur cotisation périodique.
 async function redistribuerAuxMembresAnnuels(pretOrigine, montantARepartir) {
   const beneficiaires = state.contracts.filter((c) =>
     c.statut === 'actif' &&
@@ -2141,4 +1718,3 @@ document.getElementById('modal-overlay').addEventListener('click', (e) => {
 });
 
 demarrer();
-// === FIN COLLECTEUR — PARTIE 2/2 ===
