@@ -1992,4 +1992,153 @@ async function afficherDetailsMembre(contrat) {
     <div class="soldes-row"><span>Versement comptabilisé : <b>${formatGNF(totalConfirme)}</b></span></div>
     <div class="soldes-row"><span>En attente de verrouillage (24h) : <b>${formatGNF(totalNonConfirme)}</b></span></div>
     <div class="soldes-row"><span>Montant du ${infoType.labelVersement} : <b>${formatGNF(contrat.montant_mise || 0)}</b></span></div>
-    <div class="soldes-row"><span>${infoType.labelPeriode.charAt(0).toUpperCase() + infoType.labelPeriode.slice(1)}(s) payé(s) : <b>${versementsComptes.length}/${dureeTotale}</b>
+    <div class="soldes-row"><span>${infoType.labelPeriode.charAt(0).toUpperCase() + infoType.labelPeriode.slice(1)}(s) payé(s) : <b>${versementsComptes.length}/${dureeTotale}</b></span></div>
+    ${totalNonSolde > 0 ? `<div class="soldes-row"><span style="color:#c0392b;">Contrat(s) non soldé(s)</span><span style="color:#c0392b;"><b>${formatGNF(totalNonSolde)}</b></span></div>` : ""}
+    ${depensesContrat.length > 0 ? `
+      <h2 style="margin-top:14px; font-size:15px;">Dépenses de ce contrat</h2>
+      <div style="max-height:150px; overflow-y:auto; margin-top:6px;">
+        ${depensesContrat.map((d) => `
+          <div class="soldes-row"><span>${d.date_depense || ''} — ${d.libelle} ${d.compensee ? '<span style="color:#198754;">(compensée)</span>' : '<span style="color:#e67e22;">(non compensée)</span>'}</span><span>${formatGNF(d.montant)}</span></div>
+        `).join('')}
+      </div>
+    ` : ''}
+    <div class="modal-actions">
+      <button type="button" class="secondary" id="modal-fermer-details" style="flex:1;">Fermer</button>
+    </div>
+  `);
+  document.getElementById('modal-fermer-details').addEventListener('click', fermerModal);
+}
+
+function ouvrirRemboursementPret(pretId) {
+  const pret = state.prets.find((p) => p.id === pretId);
+  if (!pret) return;
+  const montantDu = calculerMontantDuPret(pret);
+  const montant = prompt(`Montant dû : ${formatGNF(montantDu)}\nMontant remboursé aujourd'hui :`);
+  if (montant === null) return;
+  const montantNum = parseFloat(montant);
+  if (isNaN(montantNum) || montantNum <= 0) {
+    notifier('Montant invalide.', 'erreur');
+    return;
+  }
+  enregistrerRemboursement(pret, montantNum, montantDu);
+}
+
+async function enregistrerRemboursement(pret, montant, montantDuAvant) {
+  try {
+    const typeContrat = pret.type_contrat || 'journalier';
+    let interetAccumule;
+    if (typeContrat === 'hebdomadaire' || typeContrat === 'mensuel') {
+      const nbMoisEntamesFn = (await import('./utils.js')).nbMoisEntames;
+      const nbMois = nbMoisEntamesFn(pret.date_debut);
+      interetAccumule = pret.montant_initial * (pret.taux_mensuel || TAUX_MENSUEL_PRET_DEFAUT) * nbMois;
+    } else {
+      const nbSemaines = nbSemainesEntamees(pret);
+      interetAccumule = pret.montant_initial * (pret.taux_hebdo || TAUX_HEBDO_PRET) * nbSemaines;
+    }
+    const interetDejaReconnu = Number(pret.interet_deja_reconnu || 0);
+    const interetNonReconnu = Math.max(0, interetAccumule - interetDejaReconnu);
+    const interetReconnuMaintenant = Math.min(montant, interetNonReconnu);
+
+    await addDoc(collection(db, 'remboursements_prets'), {
+      pret_id: pret.id,
+      membre_id: pret.membre_id,
+      collecteur_id: state.currentCollecteurData.uid,
+      enregistre_par_role: 'collecteur',
+      enregistre_par_uid: state.currentCollecteurData.uid,
+      montant,
+      date: serverTimestamp(),
+    });
+
+    if (interetReconnuMaintenant > 0) {
+      if (typeContrat === 'hebdomadaire' || typeContrat === 'mensuel') {
+        const { pdg, collecteur, redistribution } = state.parametresInterets;
+        const montantPdg = interetReconnuMaintenant * pdg;
+        const montantCollecteur = interetReconnuMaintenant * collecteur;
+        const montantRedistribution = interetReconnuMaintenant * redistribution;
+
+        await addDoc(collection(db, 'interets_prets_repartis'), {
+          pret_id: pret.id,
+          membre_id: pret.membre_id,
+          collecteur_id: state.currentCollecteurData.uid,
+          montant_collecteur: montantCollecteur,
+          montant_pdg: montantPdg,
+          montant_redistribution: montantRedistribution,
+          date: serverTimestamp(),
+        });
+
+        if (montantRedistribution > 0) {
+          await redistribuerAuxMembresAnnuels(pret, montantRedistribution);
+        }
+      } else {
+        const montantCollecteur = interetReconnuMaintenant * PART_INTERET_COLLECTEUR;
+        const montantPdg = interetReconnuMaintenant * PART_INTERET_PDG;
+        await addDoc(collection(db, 'interets_prets_repartis'), {
+          pret_id: pret.id,
+          membre_id: pret.membre_id,
+          collecteur_id: state.currentCollecteurData.uid,
+          montant_collecteur: montantCollecteur,
+          montant_pdg: montantPdg,
+          date: serverTimestamp(),
+        });
+      }
+      await updateDoc(doc(db, 'prets', pret.id), {
+        interet_deja_reconnu: interetDejaReconnu + interetReconnuMaintenant,
+      });
+    }
+
+    if (montant >= montantDuAvant) {
+      await updateDoc(doc(db, 'prets', pret.id), { statut: 'rembourse' });
+      notifier('Prêt entièrement remboursé.', 'succes');
+    } else {
+      notifier('Remboursement enregistré.', 'succes');
+    }
+  } catch (err) {
+    console.error(err);
+    notifier('Erreur : ' + err.message, 'erreur');
+  }
+}
+
+async function redistribuerAuxMembresAnnuels(pretOrigine, montantARepartir) {
+  const beneficiaires = state.contracts.filter((c) =>
+    c.statut === 'actif' &&
+    (c.type_contrat === 'hebdomadaire' || c.type_contrat === 'mensuel') &&
+    c.id !== pretOrigine.contract_id
+  );
+  if (beneficiaires.length === 0) return;
+
+  const totalCotisations = beneficiaires.reduce((s, c) => s + Number(c.montant_mise || 0), 0);
+  if (totalCotisations <= 0) return;
+
+  for (const contrat of beneficiaires) {
+    const part = (Number(contrat.montant_mise || 0) / totalCotisations) * montantARepartir;
+    if (part <= 0) continue;
+    await addDoc(collection(db, 'redistributions_interets'), {
+      pret_id: pretOrigine.id,
+      contract_id: contrat.id,
+      membre_id: contrat.membre_id,
+      membre_nom: contrat.membre_nom,
+      collecteur_id: state.currentCollecteurData.uid,
+      montant: part,
+      date: serverTimestamp(),
+    });
+  }
+}
+
+function ouvrirModal(html) {
+  document.getElementById('modal-content').innerHTML = html;
+  const overlay = document.getElementById('modal-overlay');
+  overlay.classList.remove('hidden');
+  overlay.style.display = 'flex';
+}
+function fermerModal() {
+  const overlay = document.getElementById('modal-overlay');
+  overlay.classList.add('hidden');
+  overlay.style.display = 'none';
+  document.getElementById('modal-content').innerHTML = '';
+}
+document.getElementById('modal-overlay').addEventListener('click', (e) => {
+  if (e.target.id === 'modal-overlay') fermerModal();
+});
+
+demarrer();
+// === FIN COLLECTEUR — PARTIE 2/2 ===
