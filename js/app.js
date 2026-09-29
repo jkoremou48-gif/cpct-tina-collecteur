@@ -54,9 +54,6 @@ async function obtenirModuleTournante() {
   return moduleTournante;
 }
 
-const TAUX_COMMISSION = 0.30;
-const PART_INTERET_COLLECTEUR = 0.30;
-const PART_INTERET_PDG = 0.70;
 const TAUX_HEBDO_PRET = 0.02;
 const TAUX_MENSUEL_PRET_DEFAUT = 0.08;
 const AVATAR_DEFAUT = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='56' height='56'><rect width='56' height='56' fill='%23ddd'/></svg>";
@@ -87,6 +84,62 @@ const state = {
   unsubscribers: [],
 };
 let creationEnCours = false;
+
+// ==========================================================
+// --- NOUVEAU (28 sept 2026) : CONVENTION DE COMMISSION PROPRE AU COLLECTEUR.
+// Le PDG fixe la répartition (part PDG / part collecteur) à la création du
+// compte ; elle est copiée du code d'invitation vers le document users du
+// collecteur (taux_commission_pdg / taux_commission_collecteur, fractions dont
+// la somme vaut 1). Sans convention enregistrée : 70/30 (comportement
+// historique). Chaque versement du jour 1 porte le taux appliqué
+// (taux_pdg / taux_collecteur) pour que les changements de convention ne
+// réécrivent jamais le passé ; à défaut, on retombe sur la convention actuelle.
+// ==========================================================
+const TAUX_PDG_DEFAUT = 0.70;
+const TAUX_COLLECTEUR_DEFAUT = 0.30;
+
+function tauxDepuisUtilisateur(u) {
+  const p = u ? u.taux_commission_pdg : undefined;
+  const c = u ? u.taux_commission_collecteur : undefined;
+  if (typeof p === 'number' && typeof c === 'number' && p >= 0 && c >= 0 && Math.abs(p + c - 1) < 0.0005) {
+    return { pdg: p, collecteur: c, personnalise: true };
+  }
+  return { pdg: TAUX_PDG_DEFAUT, collecteur: TAUX_COLLECTEUR_DEFAUT, personnalise: false };
+}
+
+function tauxCollecteurCourant() {
+  return tauxDepuisUtilisateur(state.currentCollecteurData);
+}
+
+function paiementATauxFige(p) {
+  return typeof p.taux_pdg === 'number' && typeof p.taux_collecteur === 'number';
+}
+
+function tauxPourPaiement(p) {
+  if (paiementATauxFige(p)) return { pdg: p.taux_pdg, collecteur: p.taux_collecteur };
+  return tauxCollecteurCourant();
+}
+
+function partsCommissionJour1(p) {
+  const t = tauxPourPaiement(p);
+  const m = Number(p.montant || 0);
+  return { pdg: m * t.pdg, collecteur: m * t.collecteur };
+}
+
+// Répartition des frais d'inscription et des intérêts hebdo/mensuels :
+// - sans convention personnalisée → paramètres globaux (comme avant) ;
+// - sinon → la part de redistribution globale est conservée, et le reste
+//   est partagé PDG / collecteur selon la convention du collecteur.
+function repartitionFraisEtInterets() {
+  const t = tauxCollecteurCourant();
+  if (!t.personnalise) return { ...state.parametresInterets };
+  const r = state.parametresInterets.redistribution || 0;
+  return { pdg: (1 - r) * t.pdg, collecteur: (1 - r) * t.collecteur, redistribution: r };
+}
+
+function formaterPourcent(fraction) {
+  return `${Number((fraction * 100).toFixed(1))} %`;
+}
 
 const loading = document.getElementById('loading');
 const screenInscription = document.getElementById('screen-inscription');
@@ -183,7 +236,8 @@ document.getElementById('form-inscription').addEventListener('submit', async (e)
       return;
     }
 
-    const pdgId = codeSnap.data().proprietaire_id;
+    const donneesCode = codeSnap.data();
+    const pdgId = donneesCode.proprietaire_id;
     const codeParrain = genererCodeParrain('COL');
 
     const cred = await createUserWithEmailAndPassword(auth, email, password);
@@ -196,6 +250,16 @@ document.getElementById('form-inscription').addEventListener('submit', async (e)
       statut: 'actif',
       date_creation: serverTimestamp(),
     };
+    // --- NOUVEAU (28 sept 2026) : convention de commission fixée par le PDG
+    // sur le code d'invitation, recopiée sur le compte du collecteur. ---
+    const tauxCode = tauxDepuisUtilisateur({
+      taux_commission_pdg: donneesCode.taux_commission_pdg,
+      taux_commission_collecteur: donneesCode.taux_commission_collecteur,
+    });
+    if (tauxCode.personnalise) {
+      userData.taux_commission_pdg = tauxCode.pdg;
+      userData.taux_commission_collecteur = tauxCode.collecteur;
+    }
     await setDoc(doc(db, 'users', cred.user.uid), userData);
     await updateDoc(codeRef, { actif: false, utilise_par: cred.user.uid });
 
@@ -321,6 +385,24 @@ function lancerDashboard() {
   renderCollecteurHeader();
   ajouterBoutonChangerMotDePasse();
   initialiserBoutonCommunication();
+
+  // --- NOUVEAU (28 sept 2026) : suivi en direct du profil du collecteur, pour
+  // que la convention de commission modifiée par le PDG soit prise en compte
+  // sans qu'il ait à se reconnecter. ---
+  const unsubMonProfil = onSnapshot(
+    doc(db, 'users', state.currentCollecteurData.uid),
+    (snap) => {
+      if (snap.exists()) {
+        state.currentCollecteurData = {
+          ...state.currentCollecteurData,
+          ...snap.data(),
+          uid: state.currentCollecteurData.uid,
+        };
+        renderAll();
+      }
+    },
+    (err) => console.warn('Profil collecteur :', err)
+  );
 
   const unsubContracts = onSnapshot(
     query(collection(db, 'contracts'), where('collecteur_id', '==', state.currentCollecteurData.uid)),
@@ -486,6 +568,7 @@ function lancerDashboard() {
   );
 
   state.unsubscribers.push(
+    unsubMonProfil,
     unsubContracts, unsubPayments, unsubVersements, unsubPrets, unsubRemboursements,
     unsubRetraits, unsubRetraitsConfirmesMembres, unsubInterets, unsubRetraitsCommission, unsubDiffusions, unsubMesMessages,
     unsubFraisInscription, unsubDepenses, unsubRedistributions, unsubParametres, unsubPropositions,
@@ -511,11 +594,13 @@ function renderAll() {
 // --- MODIFIÉ (16 sept 2026) : tableau de bord simplifié à 5 soldes.
 // 1) Solde total d'épargne net = tous les versements - commission
 //    journalière (100%, jour 1) - retraits confirmés des membres.
-// 2) Commission collecteur (30%) et 3) Commission totale (100%) : calculées
+// 2) Commission collecteur et 3) Commission totale (100%) : calculées
 //    uniquement sur les contrats CRÉÉS ce mois-ci, NETTES des retraits de
 //    commission déjà confirmés/en attente pour ce collecteur (corrigé le
 //    26 sept 2026 : un retrait de commission doit faire baisser
 //    immédiatement ces soldes, plus les laisser inchangés après retrait).
+//    --- MODIFIÉ (28 sept 2026) : la part du collecteur suit SA convention
+//    de commission (plus le 30% fixe).
 // 4) Total collecté (corrigé le 26 sept 2026) = somme des versements reçus
 //    des membres depuis le début du mois en cours - somme des retraits
 //    confirmés des membres durant le mois en cours (définition donnée par
@@ -549,12 +634,12 @@ function renderCollecteurHeader() {
     if (el && el.parentElement) el.parentElement.style.display = 'none';
   });
 
-  // --- Calcul (inchangé) de la commission disponible au retrait, cumulée
-  // depuis le début (nécessaire pour le bouton de demande de retrait) ---
+  // --- Calcul (inchangé sur le principe) de la commission disponible au retrait,
+  // cumulée depuis le début (nécessaire pour le bouton de demande de retrait).
+  // --- MODIFIÉ (28 sept 2026) : la part du jour 1 suit la convention du collecteur. ---
   const versementsConfirmes = state.payments.filter((p) => p.statut === 'confirme');
   const commissionsConfirmees = versementsConfirmes.filter((p) => p.jour_numero === 1);
-  const totalCommissionConfirmee = commissionsConfirmees.reduce((s, p) => s + Number(p.montant || 0), 0);
-  const commissionInscriptions = totalCommissionConfirmee * TAUX_COMMISSION;
+  const commissionInscriptions = commissionsConfirmees.reduce((s, p) => s + partsCommissionJour1(p).collecteur, 0);
   const fraisInscriptionCollecteur = state.fraisInscriptions.reduce((s, f) => s + Number(f.montant_collecteur || 0), 0);
   const commissionInterets = state.interetsPartages.reduce((s, i) => s + Number(i.montant_collecteur || 0), 0);
   const CC = commissionInscriptions + fraisInscriptionCollecteur + commissionInterets;
@@ -571,9 +656,9 @@ function renderCollecteurHeader() {
   // retrait. On applique donc, sur la commission collecteur du mois, le
   // même retranchement (confirmé + en attente) que celui utilisé pour
   // "Commission disponible au retrait" ci-dessus. Le retrait étant demandé
-  // sur la commission collecteur (30%), on ne peut retrancher que cette
-  // part-là ; la part PDG (100% - 30%) n'est pas visible depuis l'app
-  // Collecteur (ses propres retraits sont gérés côté PDG).
+  // sur la commission collecteur, on ne peut retrancher que cette
+  // part-là ; la part PDG n'est pas visible depuis l'app Collecteur (ses
+  // propres retraits sont gérés côté PDG).
   const soldeTotalEpargneNet = calculerSoldeTotalEpargneNet();
   const { commissionTotale100, commissionCollecteur30: commissionCollecteur30Brute } = calculerCommissionsMoisEnCours();
   const retraitCommissionTotal = totalRetraitCommissionConfirme + totalRetraitCommissionEnAttente;
@@ -583,6 +668,7 @@ function renderCollecteurHeader() {
   // membres du mois en cours (définition donnée par le PDG, sans lien avec
   // les commissions). ---
   const totalCollecte = calculerTotalCollecteMois();
+  const tauxConvention = tauxCollecteurCourant();
 
   let situationBloc = document.getElementById('situationGenerale');
   if (!situationBloc) {
@@ -590,8 +676,9 @@ function renderCollecteurHeader() {
     situationBloc.id = 'situationGenerale';
     situationBloc.innerHTML = `
       <div class="soldes-row"><span>Solde total d'épargne net : <b id="soldeTotalEpargneNet">0 GNF</b></span></div>
-      <div class="soldes-row"><span>Solde des commissions collecteur (mois en cours, 30%, net des retraits) : <b id="soldeCommissionCollecteurMois">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Solde des commissions collecteur (mois en cours, net des retraits) : <b id="soldeCommissionCollecteurMois">0 GNF</b></span></div>
       <div class="soldes-row"><span>Commission totale (mois en cours, 100%) : <b id="soldeCommissionTotaleMois">0 GNF</b></span></div>
+      <div class="soldes-row"><span>Ma convention de commission (PDG / moi) : <b id="conventionCommission">—</b></span></div>
       <div class="soldes-row"><span>Total collecté : <b id="soldeTotalCollecte">0 GNF</b></span></div>
       <hr style="margin:10px 0; border:none; border-top:1px solid #eee;">
       <p style="font-weight:bold; margin-bottom:6px;">Épargne nette par type de contrat</p>
@@ -611,6 +698,10 @@ function renderCollecteurHeader() {
   document.getElementById('soldeCommissionTotaleMois').textContent = formatGNF(commissionTotale100);
   document.getElementById('soldeTotalCollecte').textContent = formatGNF(totalCollecte);
   document.getElementById('soldeCommissionDisponible').textContent = formatGNF(commissionDisponibleRetrait);
+  const elConvention = document.getElementById('conventionCommission');
+  if (elConvention) {
+    elConvention.textContent = `${formaterPourcent(tauxConvention.pdg)} / ${formaterPourcent(tauxConvention.collecteur)}${tauxConvention.personnalise ? '' : ' (par défaut)'}`;
+  }
   renderSoldesParType();
 
   const btnRetrait = document.getElementById('btn-demander-retrait-commission');
@@ -645,6 +736,9 @@ function calculerCommissionsMoisEnCours() {
     (p) => p.statut === 'confirme' && p.jour_numero === 1 && idsDuMois.has(p.contract_id)
   );
   const totalJour1 = jour1DuMois.reduce((s, p) => s + Number(p.montant || 0), 0);
+  // --- MODIFIÉ (28 sept 2026) : part du collecteur sur le jour 1 selon la
+  // convention (taux figé sur le versement, sinon convention actuelle). ---
+  const totalJour1Collecteur = jour1DuMois.reduce((s, p) => s + partsCommissionJour1(p).collecteur, 0);
 
   const fraisDuMois = state.fraisInscriptions.filter((f) => idsDuMois.has(f.contract_id));
   const totalFrais = fraisDuMois.reduce(
@@ -669,7 +763,9 @@ function calculerCommissionsMoisEnCours() {
   const totalFraisTournanteCollecteur = fraisTournanteDuMois.reduce((s, f) => s + Number(f.montant_collecteur || 0), 0);
 
   const commissionTotale100 = totalJour1 + totalFrais + totalInterets + totalFraisTournante;
-  const commissionCollecteur30 = totalJour1 * 0.30 + totalFraisCollecteur + totalInteretsCollecteur + totalFraisTournanteCollecteur;
+  // (le nom "commissionCollecteur30" est conservé pour ne pas toucher aux appels ;
+  // il s'agit désormais de la part du collecteur selon sa convention)
+  const commissionCollecteur30 = totalJour1Collecteur + totalFraisCollecteur + totalInteretsCollecteur + totalFraisTournanteCollecteur;
 
   return { commissionTotale100, commissionCollecteur30 };
 }
@@ -1226,7 +1322,8 @@ function trouverContratsNonSoldes(membreId, contratExclureId) {
     !c.epargne_soldee
   );
 }
-// === FIN COLLECTEUR — PARTIE 1/2 ===// === COLLECTEUR — PARTIE 2/2 ===
+// === FIN COLLECTEUR — PARTIE 1/2 ===
+// === COLLECTEUR — PARTIE 2/2 ===
 
 // ==========================================================
 // --- NOUVEAU (19 sept 2026) : TONTINE TOURNANTE côté collecteur ---
@@ -1573,7 +1670,7 @@ async function enregistrerVersement(contrat, montantSaisi, periodeDepart, period
     const dureeTotale = contrat.duree_totale || infoType.duree;
 
     for (let i = 0; i < periodesCouvertes; i++) {
-      await addDoc(collection(db, 'payments'), {
+      const donneesVersement = {
         contract_id: contrat.id,
         collecteur_id: state.currentCollecteurData.uid,
         membre_id: contrat.membre_id,
@@ -1581,7 +1678,15 @@ async function enregistrerVersement(contrat, montantSaisi, periodeDepart, period
         jour_numero: periodeDepart + i,
         statut: 'collecte',
         date: serverTimestamp(),
-      });
+      };
+      // --- NOUVEAU (28 sept 2026) : par sécurité, un éventuel versement "jour 1"
+      // d'un contrat journalier porte la convention de commission en vigueur. ---
+      if (typeContrat === 'journalier' && periodeDepart + i === 1) {
+        const t = tauxCollecteurCourant();
+        donneesVersement.taux_pdg = t.pdg;
+        donneesVersement.taux_collecteur = t.collecteur;
+      }
+      await addDoc(collection(db, 'payments'), donneesVersement);
     }
 
     const periodeFinale = periodeDepart + periodesCouvertes - 1;
@@ -1748,6 +1853,9 @@ async function creerContratEtPremierePeriode({ membreId, membreNom, typeContrat,
   const contratRef = await addDoc(collection(db, 'contracts'), contratData);
 
   if (typeContrat === 'journalier') {
+    // --- MODIFIÉ (28 sept 2026) : la convention de commission du collecteur est
+    // enregistrée sur le versement du jour 1, pour figer le taux de ce jour-là. ---
+    const tCollecteur = tauxCollecteurCourant();
     await addDoc(collection(db, 'payments'), {
       contract_id: contratRef.id,
       collecteur_id: state.currentCollecteurData.uid,
@@ -1755,11 +1863,15 @@ async function creerContratEtPremierePeriode({ membreId, membreNom, typeContrat,
       montant: montantPeriode,
       jour_numero: 1,
       statut: 'collecte',
+      taux_pdg: tCollecteur.pdg,
+      taux_collecteur: tCollecteur.collecteur,
       date: serverTimestamp(),
     });
   } else if (fraisInscription > 0) {
-    const montantPdg = fraisInscription * state.parametresInterets.pdg;
-    const montantCollecteur = fraisInscription * state.parametresInterets.collecteur;
+    // --- MODIFIÉ (28 sept 2026) : partage des frais selon la convention du collecteur. ---
+    const repartition = repartitionFraisEtInterets();
+    const montantPdg = fraisInscription * repartition.pdg;
+    const montantCollecteur = fraisInscription * repartition.collecteur;
     await addDoc(collection(db, 'frais_inscription'), {
       contract_id: contratRef.id,
       membre_id: membreId,
@@ -2169,7 +2281,8 @@ async function enregistrerRemboursement(pret, montant, montantDuAvant) {
 
     if (interetReconnuMaintenant > 0) {
       if (typeContrat === 'hebdomadaire' || typeContrat === 'mensuel') {
-        const { pdg, collecteur, redistribution } = state.parametresInterets;
+        // --- MODIFIÉ (28 sept 2026) : partage selon la convention du collecteur. ---
+        const { pdg, collecteur, redistribution } = repartitionFraisEtInterets();
         const montantPdg = interetReconnuMaintenant * pdg;
         const montantCollecteur = interetReconnuMaintenant * collecteur;
         const montantRedistribution = interetReconnuMaintenant * redistribution;
@@ -2188,8 +2301,10 @@ async function enregistrerRemboursement(pret, montant, montantDuAvant) {
           await redistribuerAuxMembresAnnuels(pret, montantRedistribution);
         }
       } else {
-        const montantCollecteur = interetReconnuMaintenant * PART_INTERET_COLLECTEUR;
-        const montantPdg = interetReconnuMaintenant * PART_INTERET_PDG;
+        // --- MODIFIÉ (28 sept 2026) : plus de 30/70 fixe, on suit la convention. ---
+        const t = tauxCollecteurCourant();
+        const montantCollecteur = interetReconnuMaintenant * t.collecteur;
+        const montantPdg = interetReconnuMaintenant * t.pdg;
         await addDoc(collection(db, 'interets_prets_repartis'), {
           pret_id: pret.id,
           membre_id: pret.membre_id,
@@ -2260,4 +2375,3 @@ document.getElementById('modal-overlay').addEventListener('click', (e) => {
 
 demarrer();
 // === FIN COLLECTEUR — PARTIE 2/2 ===
-
