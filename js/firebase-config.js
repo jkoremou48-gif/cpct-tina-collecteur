@@ -22,6 +22,7 @@ import {
   orderBy,
   onSnapshot,
   serverTimestamp,
+  getDocs,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import {
   getStorage,
@@ -92,6 +93,7 @@ export {
   orderBy,
   onSnapshot,
   serverTimestamp,
+  getDocs,
   creerCompteSecondaire,
   uploaderPhotoProfil,
   changerMotDePasse,
